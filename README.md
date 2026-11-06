@@ -34,7 +34,22 @@ Choose **NEW GAME** from the menu to start. Compiled files stay in the ignored `
 | R | Restart |
 | M, while debug mode is enabled | Reveal the map |
 
+Hold a direction to keep moving. The most recently pressed direction takes priority;
+release it to resume another direction you are still holding. Shift changes between
+walking and running while moving. Switching away from the window clears held input.
+
 The imported source has `DEBUG = true`. In this mode, shifts happen every 30 seconds and the random generator uses a fixed seed. Normal mode uses a 2–3 minute shift interval. The initial import preserves these settings.
+
+## Movement input checks
+
+These checks exercise the Swing key bindings and movement timing without opening a
+game window. They cover held input, turning, running, walls, focus loss, lockers,
+restart, and panel cleanup.
+
+```shell
+javac --release 17 -d build/test-classes Main.java tests/MovementInputTest.java
+java "-Djava.awt.headless=true" -cp build/test-classes com.mycompany.deadsignal.MovementInputTest
+```
 
 ## Sprite images
 
