@@ -15,7 +15,13 @@ final class Main extends JPanel {
     // CHARACTER SPRITES
     // -------------------------------------------------
 
+    // PNG files live in src/main/resources/assets/player and .../monster.
+    // They are loaded from the classpath, so no computer-specific paths.
     static final class SpriteAssets {
+
+        // Side-view sprites face LEFT. Set to false if yours face right.
+        static final boolean SIDE_SPRITES_FACE_LEFT = true;
+
         static final BufferedImage[] PLAYER_FRONT = loadFrames(
                 "player/tambay1front.png",
                 "player/tambay2.png",
@@ -34,96 +40,155 @@ final class Main extends JPanel {
                 "player/tambay11.png",
                 "player/tambay12.png"
         );
+        // Only a front view exists, so every direction uses these frames
         static final BufferedImage[] MONSTER = loadFrames(
-                "monster/Tikabalang2.png",
                 "monster/tikbalang1.png",
-                "monster/tikabalang4.png"
+                "monster/Tikabalang2.png",
+                "monster/tikbalang3.png",
+                "monster/tikabalang4.png",
+                "monster/tikbalang5.png",
+                "monster/tikbalang6.png"
         );
 
+        // Loads a group of frames and crops them all to the SAME box, so the
+        // character keeps one size and its feet stay in the same place.
         private static BufferedImage[] loadFrames(String... paths) {
+
             BufferedImage[] images = new BufferedImage[paths.length];
+
+            int minX = Integer.MAX_VALUE;
+            int minY = Integer.MAX_VALUE;
+            int maxX = -1;
+            int maxY = -1;
+
             for (int i = 0; i < paths.length; i++) {
+
                 images[i] = loadSprite(paths[i]);
+
+                if (images[i] == null) {
+                    continue;
+                }
+
+                for (int y = 0; y < images[i].getHeight(); y++) {
+                    for (int x = 0; x < images[i].getWidth(); x++) {
+                        if ((images[i].getRGB(x, y) >>> 24) != 0) {
+                            minX = Math.min(minX, x);
+                            minY = Math.min(minY, y);
+                            maxX = Math.max(maxX, x);
+                            maxY = Math.max(maxY, y);
+                        }
+                    }
+                }
             }
+
+            if (maxX < minX || maxY < minY) {
+                return images; // nothing visible (or nothing loaded)
+            }
+
+            for (int i = 0; i < images.length; i++) {
+                if (images[i] != null) {
+                    images[i] = images[i].getSubimage(minX, minY,
+                            maxX - minX + 1, maxY - minY + 1);
+                }
+            }
+
             return images;
         }
 
+        // Reads one PNG from the classpath (returns null if it is missing)
         private static BufferedImage loadSprite(String path) {
+
             try {
-                InputStream stream = Main.class.getResourceAsStream("/assets/" + path);
+                InputStream stream =
+                        Main.class.getResourceAsStream("/assets/" + path);
+
                 if (stream == null) {
+                    // Fallback for running outside the IDE's classpath
                     File file = new File("src/main/resources/assets/" + path);
-                    if (!file.exists()) file = new File("assets/" + path);
-                    if (!file.exists()) return null;
+
+                    if (!file.exists()) {
+                        file = new File("assets/" + path);
+                    }
+
+                    if (!file.exists()) {
+                        System.err.println("Missing sprite: assets/" + path);
+                        return null;
+                    }
+
                     stream = new FileInputStream(file);
                 }
 
                 try (InputStream input = stream) {
-                    BufferedImage image = ImageIO.read(input);
-                    if (image == null) return null;
-
-                    // Remove the unused transparent border around each 64x64 drawing.
-                    int minX = image.getWidth();
-                    int minY = image.getHeight();
-                    int maxX = -1;
-                    int maxY = -1;
-                    for (int y = 0; y < image.getHeight(); y++) {
-                        for (int x = 0; x < image.getWidth(); x++) {
-                            if ((image.getRGB(x, y) >>> 24) != 0) {
-                                minX = Math.min(minX, x);
-                                minY = Math.min(minY, y);
-                                maxX = Math.max(maxX, x);
-                                maxY = Math.max(maxY, y);
-                            }
-                        }
-                    }
-                    if (maxX < minX || maxY < minY) return image;
-                    return image.getSubimage(minX, minY,
-                            maxX - minX + 1, maxY - minY + 1);
+                    return ImageIO.read(input);
                 }
+
             } catch (IOException | RuntimeException ex) {
-                System.err.println("Could not load sprite: " + path + " - " + ex.getMessage());
+                System.err.println("Could not load sprite: " + path
+                        + " - " + ex.getMessage());
                 return null;
             }
         }
 
-        static BufferedImage frame(BufferedImage[] frames, long time, long lastAction, int interval) {
-            if (frames == null || frames.length == 0) return null;
+        // Picks the animation frame. Frame 0 is the standing pose; the walk
+        // cycle only plays for a moment after the character last moved.
+        static BufferedImage frame(BufferedImage[] frames, long time,
+                                   long lastAction, int interval) {
+
+            if (frames == null || frames.length == 0) {
+                return null;
+            }
+
             int index = 0;
+
             if (time - lastAction < 350 && frames.length > 1) {
                 index = (int) ((time / interval) % frames.length);
             }
+
             return frames[index];
         }
 
+        // Draws a sprite with its feet at bottomY, scaled without
+        // distortion (same scale on both axes), pixel-art sharp.
         static void draw(Graphics2D g, Image image, int centerX, int bottomY,
-                         int maxWidth, int maxHeight, float alpha, boolean flip) {
-            if (image == null) return;
+                         int maxWidth, int maxHeight, float alpha,
+                         boolean flip) {
+
+            if (image == null) {
+                return;
+            }
 
             int iw = image.getWidth(null);
             int ih = image.getHeight(null);
-            if (iw <= 0 || ih <= 0) return;
 
-            double scale = Math.min((double) maxWidth / iw, (double) maxHeight / ih);
+            if (iw <= 0 || ih <= 0) {
+                return;
+            }
+
+            double scale = Math.min((double) maxWidth / iw,
+                    (double) maxHeight / ih);
+
             int width = Math.max(1, (int) Math.round(iw * scale));
             int height = Math.max(1, (int) Math.round(ih * scale));
             int x = centerX - width / 2;
             int y = bottomY - height;
 
             Graphics2D copy = (Graphics2D) g.create();
+
             copy.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
                     RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-            copy.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
+            copy.setComposite(AlphaComposite.getInstance(
+                    AlphaComposite.SRC_OVER, alpha));
+
             if (flip) {
                 copy.drawImage(image, x + width, y, x, y + height,
                         0, 0, iw, ih, null);
             } else {
                 copy.drawImage(image, x, y, width, height, null);
             }
+
             copy.dispose();
         }
     }
-
 
     // -------------------------------------------------
     // CONFIGURATION (tweak everything here)
@@ -178,6 +243,7 @@ final class Main extends JPanel {
     static final int WALK_NOISE = 3;
     static final int RUN_NOISE = 8;
     static final int LOCKER_NOISE = 5;
+    static final int PICKUP_NOISE = 4;
 
     // Item noise levels
     static final int BOTTLE_NOISE = 12;
@@ -185,6 +251,13 @@ final class Main extends JPanel {
     static final int PIPE_NOISE = 14;
     static final int BOOK_NOISE = 7;
     static final int BOX_NOISE = 9;
+
+    // Noise meter (HUD feedback for the player only; the monster never reads it)
+    static final int NOISE_FULL_LOUDNESS = PIPE_NOISE; // loudness that fills the bar
+    static final double NOISE_DECAY_PER_SECOND = 0.35; // how fast the bar falls
+    static final int NOISE_SEGMENTS = 10;
+    static final long RECENT_NOISE_MS = 1500;          // how long "(Running)" shows
+    static final double RECENT_NOISE_MIN = 0.30;       // quieter sounds get no label
 
     // Every wall between a sound and the monster adds this much distance...
     static final int WALL_MUFFLE = 2;
@@ -257,20 +330,52 @@ final class Main extends JPanel {
     // (just enough to see where a hallway entrance is)
     static final int HALL_THRESHOLD = 1;
 
+    // Player awareness meter (how aware the MONSTER is of the player).
+    // Target value per monster state comes from the real AI state.
+    static final double AWARE_CHASE = 1.00;      // it sees you
+    static final double AWARE_LOSE_PLAYER = 0.70; // just lost sight of you
+    static final double AWARE_INVESTIGATE = 0.50; // heard YOU (steps, locker)
+    static final double AWARE_SEARCH = 0.30;      // searching where it heard you
+    static final double AWARE_RETURN = 0.12;      // giving up, heading back
+    static final double AWARE_DISTRACTED_INVESTIGATE = 0.20; // heard a thrown item
+    static final double AWARE_DISTRACTED_SEARCH = 0.10;
+    static final int AWARE_NEAR_RANGE = 12;       // tiles for the closeness bonus
+    static final double AWARE_PROXIMITY_BONUS = 0.20; // extra when very close
+    static final double AWARE_HIDDEN_FACTOR = 0.60;   // hiding lowers it
+    static final double AWARE_RISE_PER_SECOND = 1.20; // grows fast
+    static final double AWARE_FALL_PER_SECOND = 0.20; // fades slowly
+
+    static final Color AWARE_TITLE_COLOR = new Color(150, 120, 122);
+    static final Color AWARE_BACK_COLOR = new Color(26, 12, 14);
+    static final Color AWARE_FRAME_COLOR = new Color(80, 40, 44);
+    static final Color AWARE_LOW_COLOR = new Color(100, 38, 42);
+    static final Color AWARE_HIGH_COLOR = new Color(215, 55, 58);
+
+    // Noise meter colors (monochrome; only "very loud" gets a faint red tint)
+    static final Color NOISE_EMPTY_COLOR = new Color(45, 45, 50);
+    static final Color NOISE_LOW_COLOR = new Color(120, 120, 126);
+    static final Color NOISE_MID_COLOR = new Color(175, 175, 180);
+    static final Color NOISE_HIGH_COLOR = new Color(230, 230, 235);
+    static final Color NOISE_PULSE_A = new Color(215, 150, 150);
+    static final Color NOISE_PULSE_B = new Color(140, 85, 85);
+
     // -------------------------------------------------
     // SOUND TYPES AND EVENTS
     // -------------------------------------------------
 
     enum SoundType {
-        WALK(WALK_NOISE),
-        RUN(RUN_NOISE),
-        LOCKER(LOCKER_NOISE),
-        IMPACT(BOTTLE_NOISE); // thrown items use their own loudness
+        WALK(WALK_NOISE, "Footsteps"),
+        RUN(RUN_NOISE, "Running"),
+        LOCKER(LOCKER_NOISE, "Locker"),
+        PICKUP(PICKUP_NOISE, "Object"),
+        IMPACT(BOTTLE_NOISE, "Impact"); // thrown items use their own loudness
 
         final int loudness;
+        final String label; // short text for the HUD
 
-        SoundType(int loudness) {
+        SoundType(int loudness, String label) {
             this.loudness = loudness;
+            this.label = label;
         }
     }
 
@@ -279,13 +384,16 @@ final class Main extends JPanel {
         final int x;
         final int y;
         final int loudness;
+        final boolean byPlayer; // false = environment / monster sound
         final long time;
 
-        SoundEvent(SoundType type, int x, int y, int loudness, long time) {
+        SoundEvent(SoundType type, int x, int y, int loudness,
+                   boolean byPlayer, long time) {
             this.type = type;
             this.x = x;
             this.y = y;
             this.loudness = loudness;
+            this.byPlayer = byPlayer;
             this.time = time;
         }
     }
@@ -447,6 +555,24 @@ final class Main extends JPanel {
     MonsterState monsterState = MonsterState.PATROLLING;
 
     Queue<SoundEvent> soundQueue = new LinkedList<>();
+
+    // Player noise meter: 0.0 (silent) to 1.0 (as loud as it gets)
+    double noise = 0;
+    long lastNoiseUpdate = 0;
+    String lastNoiseText = "";
+    long lastNoiseTextTime = 0;
+
+    // Player awareness meter: 0.0 (monster unaware) to 1.0 (hunting you)
+    double awareness = 0;
+    double awarenessTarget = 0;
+    long lastAwareUpdate = 0;
+    // True when the monster is investigating a THROWN item, not the player
+    boolean heardDistraction = false;
+
+    // DEBUG only: the most recent sound and whether the monster heard it
+    SoundType lastSoundType = null;
+    int lastSoundLoudness = 0;
+    boolean lastSoundHeard = false;
 
     Random random = DEBUG ? new Random(SEED) : new Random();
 
@@ -1105,6 +1231,8 @@ final class Main extends JPanel {
         items.remove(it);
         held = it;
 
+        emitSound(SoundType.PICKUP, playerX, playerY); // small noise
+
         message = "You pick up the " + it.type.label + ".";
         repaint();
     }
@@ -1290,16 +1418,261 @@ final class Main extends JPanel {
     // SOUND SYSTEM
     // -------------------------------------------------
 
-    // Anything in the game can call this to make noise
+    // Anything in the game can call this to make noise.
+    // Sounds made through these two methods count as PLAYER noise.
     void emitSound(SoundType type, int x, int y) {
         emitSound(type, x, y, type.loudness);
     }
 
     // Same, but with a custom loudness (thrown items)
     void emitSound(SoundType type, int x, int y, int loudness) {
+        emitSound(type, x, y, loudness, true);
+    }
+
+    // For sounds the player did not make (building creaks, monster steps).
+    // The monster can hear them, but they do NOT raise the noise meter.
+    void emitEnvironmentalSound(SoundType type, int x, int y, int loudness) {
+        emitSound(type, x, y, loudness, false);
+    }
+
+    // The one place every sound goes through
+    void emitSound(SoundType type, int x, int y, int loudness,
+                   boolean byPlayer) {
+
+        long now = System.currentTimeMillis();
+
         soundQueue.add(new SoundEvent(
-                type, x, y, loudness, System.currentTimeMillis()
+                type, x, y, loudness, byPlayer, now
         ));
+
+        lastSoundType = type;
+        lastSoundLoudness = loudness;
+
+        if (byPlayer) {
+            addPlayerNoise(type, loudness, now);
+        }
+    }
+
+    // -------------------------------------------------
+    // PLAYER NOISE METER
+    // -------------------------------------------------
+
+    // Raises the meter using the sound's existing loudness value.
+    // This only tells the PLAYER how loud they were. The monster decides
+    // what it hears in monsterHears(), never from this meter.
+    void addPlayerNoise(SoundType type, int loudness, long now) {
+
+        double level = Math.min(1.0, (double) loudness / NOISE_FULL_LOUDNESS);
+
+        noise = Math.max(noise, level);
+
+        if (level >= RECENT_NOISE_MIN) {
+            lastNoiseText = type.label;
+            lastNoiseTextTime = now;
+        }
+    }
+
+    // Called every game tick: the meter slowly falls back to zero
+    void updateNoise(long now) {
+
+        double seconds = (now - lastNoiseUpdate) / 1000.0;
+
+        lastNoiseUpdate = now;
+
+        noise = Math.max(0, noise - NOISE_DECAY_PER_SECOND * seconds);
+    }
+
+    String noiseLabel() {
+
+        if (noise < 0.05) {
+            return "QUIET";
+        }
+
+        if (noise < 0.30) {
+            return "LOW";
+        }
+
+        if (noise < 0.55) {
+            return "NOTICEABLE";
+        }
+
+        if (noise < 0.80) {
+            return "LOUD";
+        }
+
+        return "VERY LOUD";
+    }
+
+    // SOUND LEVEL meter: blocky 10-segment bar (how loud the PLAYER is)
+    void drawSoundMeter(Graphics2D g2, int x, int y) {
+
+        long now = System.currentTimeMillis();
+
+        Color c;
+
+        if (noise >= 0.80) {
+            // Very loud: slow pulse between two dim reds
+            c = ((now / 150) % 2 == 0) ? NOISE_PULSE_A : NOISE_PULSE_B;
+        } else if (noise >= 0.55) {
+            c = NOISE_HIGH_COLOR;
+        } else if (noise >= 0.30) {
+            c = NOISE_MID_COLOR;
+        } else {
+            c = NOISE_LOW_COLOR;
+        }
+
+        g2.setColor(NOISE_LOW_COLOR);
+        g2.drawString("SOUND LEVEL", x, y);
+
+        g2.setColor(c);
+        g2.drawString(noiseLabel(), x + 92, y);
+
+        int filled = noise < 0.02
+                ? 0 : (int) Math.ceil(noise * NOISE_SEGMENTS);
+
+        for (int i = 0; i < NOISE_SEGMENTS; i++) {
+            g2.setColor(i < filled ? c : NOISE_EMPTY_COLOR);
+            g2.fillRect(x + i * 13, y + 5, 11, 9);
+        }
+
+        // Which action made the noise (only for noticeable sounds)
+        if (now - lastNoiseTextTime < RECENT_NOISE_MS &&
+                !lastNoiseText.isEmpty()) {
+            g2.setColor(NOISE_LOW_COLOR);
+            g2.drawString("(" + lastNoiseText + ")", x + 136, y + 14);
+        }
+    }
+
+    // -------------------------------------------------
+    // PLAYER AWARENESS METER
+    // -------------------------------------------------
+
+    // What the monster's AI state says about how aware it is of the PLAYER.
+    // The player only ever sees a bar, never where the monster is.
+    double computeAwarenessTarget() {
+
+        if (monsterState == MonsterState.CHASE) {
+            return AWARE_CHASE; // it can see the player right now
+        }
+
+        double base;
+
+        switch (monsterState) {
+            case LOSE_PLAYER -> base = AWARE_LOSE_PLAYER;
+            case INVESTIGATING -> base = heardDistraction
+                    ? AWARE_DISTRACTED_INVESTIGATE : AWARE_INVESTIGATE;
+            case SEARCHING -> base = heardDistraction
+                    ? AWARE_DISTRACTED_SEARCH : AWARE_SEARCH;
+            case RETURN_TO_PATROL -> base = AWARE_RETURN;
+            default -> base = 0; // patrolling: unaware
+        }
+
+        if (base <= 0) {
+            return 0;
+        }
+
+        // Closer to the monster = it is more aware of you
+        int dist = Math.abs(monsterX - playerX) + Math.abs(monsterY - playerY);
+
+        double closeness =
+                1.0 - Math.min(dist, AWARE_NEAR_RANGE) / (double) AWARE_NEAR_RANGE;
+
+        base += AWARE_PROXIMITY_BONUS * closeness;
+
+        // Hiding in a locker: the monster cannot see you
+        if (hidden) {
+            base *= AWARE_HIDDEN_FACTOR;
+        }
+
+        return Math.min(base, 0.95); // only a real chase reaches 100%
+    }
+
+    // Called every game tick: the bar rises quickly and fades slowly
+    void updateAwareness(long now) {
+
+        double seconds = (now - lastAwareUpdate) / 1000.0;
+
+        lastAwareUpdate = now;
+
+        awarenessTarget = computeAwarenessTarget();
+
+        if (awarenessTarget > awareness) {
+            awareness = Math.min(awarenessTarget,
+                    awareness + AWARE_RISE_PER_SECOND * seconds);
+        } else {
+            awareness = Math.max(awarenessTarget,
+                    awareness - AWARE_FALL_PER_SECOND * seconds);
+        }
+    }
+
+    String awarenessLabel() {
+
+        if (awareness < 0.08) {
+            return "UNAWARE";
+        }
+
+        if (awareness < 0.35) {
+            return "SUSPICIOUS";
+        }
+
+        if (awareness < 0.70) {
+            return "ALERT";
+        }
+
+        return "HUNTED";
+    }
+
+    // PLAYER AWARENESS meter: smooth dark-red bar with a frame and ticks
+    void drawAwarenessMeter(Graphics2D g2, int x, int y) {
+
+        long now = System.currentTimeMillis();
+
+        int barW = NOISE_SEGMENTS * 13 - 2; // same width as the sound meter
+
+        // Color goes from dull red to a stronger red as awareness grows
+        double a = Math.max(0, Math.min(1, awareness));
+
+        int r = (int) (AWARE_LOW_COLOR.getRed()
+                + a * (AWARE_HIGH_COLOR.getRed() - AWARE_LOW_COLOR.getRed()));
+        int gr = (int) (AWARE_LOW_COLOR.getGreen()
+                + a * (AWARE_HIGH_COLOR.getGreen() - AWARE_LOW_COLOR.getGreen()));
+        int b = (int) (AWARE_LOW_COLOR.getBlue()
+                + a * (AWARE_HIGH_COLOR.getBlue() - AWARE_LOW_COLOR.getBlue()));
+
+        // When it is hunting you the bar throbs
+        if (a >= 0.70) {
+            double pulse = 0.78 + 0.22 * Math.sin(now / 110.0);
+            r = (int) (r * pulse);
+            gr = (int) (gr * pulse);
+            b = (int) (b * pulse);
+        }
+
+        Color c = new Color(r, gr, b);
+
+        g2.setColor(AWARE_TITLE_COLOR);
+        g2.drawString("PLAYER AWARENESS", x, y);
+
+        g2.setColor(a < 0.08 ? NOISE_LOW_COLOR : c.brighter());
+        g2.drawString(awarenessLabel(), x + 140, y);
+
+        // Frame and dark background
+        g2.setColor(AWARE_BACK_COLOR);
+        g2.fillRect(x, y + 5, barW, 9);
+
+        // Filled part
+        int fill = (int) Math.round(a * (barW - 4));
+
+        g2.setColor(c);
+        g2.fillRect(x + 2, y + 7, fill, 5);
+
+        // Tick marks at 25%, 50% and 75%
+        g2.setColor(AWARE_FRAME_COLOR);
+
+        for (int i = 1; i <= 3; i++) {
+            g2.fillRect(x + barW * i / 4, y + 5, 1, 9);
+        }
+
+        g2.drawRect(x, y + 5, barW - 1, 8);
     }
 
     // The monster listens to everything that was emitted
@@ -1317,10 +1690,16 @@ final class Main extends JPanel {
                 continue;
             }
 
-            if (monsterHears(sound)) {
+            boolean heard = monsterHears(sound);
+            lastSoundHeard = heard;
+
+            if (heard) {
                 targetX = sound.x;
                 targetY = sound.y;
                 monsterState = MonsterState.INVESTIGATING;
+
+                // A thrown item distracts it; the player's own noise does not
+                heardDistraction = (sound.type == SoundType.IMPACT);
             }
         }
     }
@@ -1388,6 +1767,7 @@ final class Main extends JPanel {
 
             if (monsterState != MonsterState.CHASE) {
                 monsterState = MonsterState.CHASE;
+                heardDistraction = false;
                 message = "IT SAW YOU! RUN!";
             }
 
@@ -1505,6 +1885,7 @@ final class Main extends JPanel {
         targetX = lockers[best][0];
         targetY = lockers[best][1];
         monsterState = MonsterState.INVESTIGATING;
+        heardDistraction = false; // it suspects the player, not a noise
 
         return true;
     }
@@ -1854,6 +2235,8 @@ final class Main extends JPanel {
 
         long now = System.currentTimeMillis();
 
+        updateNoise(now);
+
         if (now >= nextShiftAt) {
 
             shiftNumber++;
@@ -1867,6 +2250,8 @@ final class Main extends JPanel {
         }
 
         updateMonster();
+
+        updateAwareness(now); // after the AI has decided its new state
 
         repaint();
     }
@@ -1895,6 +2280,15 @@ final class Main extends JPanel {
 
         soundQueue.clear();
 
+        noise = 0;
+        awareness = 0;
+        awarenessTarget = 0;
+        heardDistraction = false;
+        lastNoiseText = "";
+        lastSoundType = null;
+        lastSoundLoudness = 0;
+        lastSoundHeard = false;
+
         targetX = -1;
         targetY = -1;
         lastSeenX = -1;
@@ -1913,6 +2307,8 @@ final class Main extends JPanel {
         long now = System.currentTimeMillis();
 
         nextShiftAt = now + nextShiftDelay();
+        lastNoiseUpdate = now;
+        lastAwareUpdate = now;
         lastMonsterMove = now;
         lastPlayerMove = 0;
 
@@ -1967,7 +2363,18 @@ final class Main extends JPanel {
 
         super.paintComponent(g);
 
-        Graphics2D g2 = (Graphics2D) g;
+        Graphics2D g2 = (Graphics2D) g.create();
+
+        double scaleX = (double) getWidth() / 840;
+        double scaleY = (double) getHeight() / 688;
+
+        double scale = Math.min(scaleX, scaleY);
+
+        double offsetX = (getWidth() - (840 * scale)) / 2;
+        double offsetY = (getHeight() - (688 * scale)) / 2;
+
+        g2.translate(offsetX, offsetY);
+        g2.scale(scale, scale);
 
         updateCeilings();
 
@@ -2097,43 +2504,52 @@ final class Main extends JPanel {
         if ((DEBUG && revealAll) ||
                 (canSeeTile(monsterX, monsterY) && playerSeesMonster())) {
 
+            // The monster is a tall creature: feet on its tile, head
+            // reaching into the tile above. It sways slowly even when
+            // standing still, so it never looks frozen.
             long spriteTime = System.currentTimeMillis();
+
             BufferedImage monsterSprite = SpriteAssets.frame(
-                    SpriteAssets.MONSTER, spriteTime, lastMonsterMove, 220);
+                    SpriteAssets.MONSTER, spriteTime, spriteTime, 250);
+
             SpriteAssets.draw(g2, monsterSprite,
                     monsterX * TILE + TILE / 2,
                     monsterY * TILE + TILE,
                     TILE + 14, TILE * 2,
                     1.0f, false);
-            if (monsterSprite == null) {
+
+            if (monsterSprite == null) { // sprite missing: old placeholder
                 g2.setColor(monsterColor());
                 g2.fillOval(monsterX * TILE + 3, monsterY * TILE + 3,
                         TILE - 6, TILE - 6);
             }
         }
 
-        // Draw player using the supplied pixel-art direction frames.
-        long spriteTime = System.currentTimeMillis();
+        // Draw the player: sprite set depends on the facing direction
+        long playerTime = System.currentTimeMillis();
         BufferedImage[] playerFrames;
         boolean flipPlayer = false;
+
         if (faceY > 0) {
             playerFrames = SpriteAssets.PLAYER_FRONT;
         } else if (faceY < 0) {
             playerFrames = SpriteAssets.PLAYER_BACK;
         } else {
             playerFrames = SpriteAssets.PLAYER_SIDE;
-            flipPlayer = faceX > 0;
+            flipPlayer = SpriteAssets.SIDE_SPRITES_FACE_LEFT
+                    ? faceX > 0 : faceX < 0;
         }
 
         BufferedImage playerSprite = SpriteAssets.frame(
-                playerFrames, spriteTime, lastPlayerMove, 130);
+                playerFrames, playerTime, lastPlayerMove, 130);
+
         SpriteAssets.draw(g2, playerSprite,
                 playerX * TILE + TILE / 2,
                 playerY * TILE + TILE,
                 TILE - 3, TILE,
                 hidden ? 0.38f : 1.0f, flipPlayer);
 
-        if (playerSprite == null) {
+        if (playerSprite == null) { // sprite missing: old placeholder
             g2.setColor(hidden
                     ? PLAYER_COLOR.darker().darker() : PLAYER_COLOR);
             g2.fillOval(playerX * TILE + 5, playerY * TILE + 5,
@@ -2167,19 +2583,21 @@ final class Main extends JPanel {
         g2.setColor(Color.WHITE);
 
         g2.drawString(
-                "Keycard: " + (hasKey ? "YES" : "NO"),
-                10, panelY + 18
-        );
-
-        g2.drawString(
-                "Status: " + (hidden ? "HIDDEN" : "EXPOSED"),
-                10, panelY + 36
+                "Keycard: " + (hasKey ? "YES" : "NO")
+                        + "   Status: " + (hidden ? "HIDDEN" : "EXPOSED"),
+                10, panelY + 16
         );
 
         g2.drawString(
                 "Holding: " + (held == null ? "nothing" : held.type.label),
-                10, panelY + 54
+                10, panelY + 32
         );
+
+        // Two separate meters: what YOU do, and what the MONSTER knows
+        drawSoundMeter(g2, 10, panelY + 52);
+        drawAwarenessMeter(g2, 10, panelY + 78);
+
+        g2.setColor(Color.WHITE); // meters changed the color; restore it
 
         g2.drawString(
                 message,
@@ -2243,13 +2661,17 @@ final class Main extends JPanel {
             );
 
             g2.drawString(
-                    "Held item: "
-                            + (held == null ? "none" : held.type.label),
+                    String.format("Noise %.2f last:%s(%d) heard:%s",
+                            noise,
+                            lastSoundType == null ? "-" : lastSoundType.name(),
+                            lastSoundLoudness,
+                            lastSoundHeard ? "yes" : "no"),
                     560, panelY + 70
             );
 
             g2.drawString(
-                    "Monster: " + monsterState.label,
+                    String.format("Monster: %s aware %.2f>%.2f",
+                            monsterState.label, awareness, awarenessTarget),
                     560, panelY + 84
             );
 
@@ -2438,12 +2860,16 @@ final class Main extends JPanel {
     public static void main(String[] args) {
         System.setProperty("awt.useSystemAAFontSettings", "on");
         System.setProperty("swing.aatext", "true");
+
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("DEAD SIGNAL: THE SHIFTING FACILITY");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-            frame.setResizable(false);
+
             frame.setContentPane(new MainMenuPanel(frame));
-            frame.pack();
+
+            frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
+            frame.setMinimumSize(new Dimension(1000, 700));
+
             frame.setLocationRelativeTo(null);
             frame.setVisible(true);
         });
