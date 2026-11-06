@@ -9,6 +9,10 @@ import java.util.function.LongSupplier;
 import java.io.*;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.LineUnavailableException;
+import javax.sound.sampled.SourceDataLine;
 
 final class Main extends JPanel {
 
@@ -352,6 +356,12 @@ final class Main extends JPanel {
     static final Color AWARE_LOW_COLOR = new Color(100, 38, 42);
     static final Color AWARE_HIGH_COLOR = new Color(215, 55, 58);
 
+    static final int CUE_PROXIMITY_RANGE = 10;
+    static final int CUE_STING_COOLDOWN_MS = 6000;
+    static final int CUE_MAX_EDGE_ALPHA = 64;
+    static final int CUE_SAMPLE_RATE = 22050;
+    static final WarningSettings WARNING_SETTINGS = new WarningSettings();
+
     // Noise meter colors (monochrome; only "very loud" gets a faint red tint)
     static final Color NOISE_EMPTY_COLOR = new Color(45, 45, 50);
     static final Color NOISE_LOW_COLOR = new Color(120, 120, 126);
@@ -582,6 +592,8 @@ final class Main extends JPanel {
     double awareness = 0;
     double awarenessTarget = 0;
     long lastAwareUpdate = 0;
+    final WarningCues warningCues = new WarningCues();
+    boolean warningSettingsOpen = false;
     // True when the monster is investigating a THROWN item, not the player
     boolean heardDistraction = false;
 
@@ -609,7 +621,7 @@ final class Main extends JPanel {
 
         restartGame(); // builds the first game
 
-        // Timers start when the game panel is attached to the window.
+        // Timers and audio start only when the game panel is attached.
     }
 
     @Override
@@ -621,6 +633,7 @@ final class Main extends JPanel {
             movementWindow.addWindowFocusListener(movementFocusListener);
         }
         movementTimer.start();
+        warningCues.audio.start();
         gameTimer.start();
     }
 
@@ -633,7 +646,75 @@ final class Main extends JPanel {
             movementWindow.removeWindowFocusListener(movementFocusListener);
             movementWindow = null;
         }
+        warningCues.audio.close();
         super.removeNotify();
+    }
+
+    double nearbyMonsterLevel() {
+        int distance = Math.abs(monsterX - playerX) + Math.abs(monsterY - playerY);
+        distance += WALL_MUFFLE * Math.min(MAX_MUFFLE_WALLS,
+                wallsBetween(playerX, playerY, monsterX, monsterY));
+        double level = Math.max(0, 1.0 - distance / (double) CUE_PROXIMITY_RANGE);
+        return level * level * (hidden ? AWARE_HIDDEN_FACTOR : 1.0);
+    }
+
+    void updateWarningCues(long now) {
+        Window window = SwingUtilities.getWindowAncestor(this);
+        boolean active = !gameOver && !won && !warningSettingsOpen
+                && isShowing() && window != null && window.isFocused();
+        warningCues.update(awareness, nearbyMonsterLevel(), active, now);
+    }
+
+    void openWarningSettings() {
+        if (warningSettingsOpen) return;
+        WarningPause pause = pauseWarningSettings();
+        try {
+            showWarningSettings(this);
+        } finally {
+            resumeWarningSettings(pause);
+        }
+    }
+
+    record WarningPause(long openedAt, long movementAt,
+                        boolean gameTimerRunning, boolean movementTimerRunning) { }
+
+    WarningPause pauseWarningSettings() {
+        WarningPause pause = new WarningPause(System.currentTimeMillis(),
+                movementClock.getAsLong(), gameTimer.isRunning(), movementTimer.isRunning());
+        warningSettingsOpen = true;
+        movementTimer.stop();
+        gameTimer.stop();
+        clearMovementInput();
+        warningCues.update(awareness, nearbyMonsterLevel(), false, pause.openedAt());
+        return pause;
+    }
+
+    void resumeWarningSettings(WarningPause pause) {
+        long now = System.currentTimeMillis();
+        long paused = Math.max(0, now - pause.openedAt());
+        nextShiftAt += paused;
+        lastNoiseUpdate += paused;
+        lastAwareUpdate += paused;
+        lastMonsterMove += paused;
+        lastPlayerMove += paused;
+        lastNoiseTextTime += paused;
+        if (playerHasStepped) {
+            lastPlayerStepNanos += Math.max(0, movementClock.getAsLong() - pause.movementAt());
+        }
+        Queue<SoundEvent> pausedSounds = new LinkedList<>();
+        for (SoundEvent sound : soundQueue) {
+            pausedSounds.add(new SoundEvent(sound.type, sound.x, sound.y,
+                    sound.loudness, sound.byPlayer, sound.time + paused));
+        }
+        soundQueue = pausedSounds;
+        clearMovementInput();
+        warningSettingsOpen = false;
+        updateWarningCues(now);
+        if (isDisplayable()) {
+            if (pause.movementTimerRunning()) movementTimer.start();
+            if (pause.gameTimerRunning()) gameTimer.start();
+        }
+        repaint();
     }
 
     // -------------------------------------------------
@@ -1109,6 +1190,7 @@ final class Main extends JPanel {
         bindAction("Q", "throw", this::throwItem);
         bindAction("F", "locker", this::toggleLocker);
         bindAction("R", "restart", this::restartGame);
+        bindAction("P", "warning-settings", this::openWarningSettings);
         bindAction("M", "reveal", () -> {
             if (DEBUG) {
                 revealAll = !revealAll;
@@ -1140,7 +1222,7 @@ final class Main extends JPanel {
             boolean running = modifiers != 0;
             bindAction(KeyStroke.getKeyStroke(keyCode, modifiers, false),
                     "move-pressed-" + keyCode + "-" + modifiers, () -> {
-                if (gameOver || won || hidden) {
+                if (gameOver || won || hidden || warningSettingsOpen) {
                     clearMovementInput();
                     return;
                 }
@@ -1187,7 +1269,7 @@ final class Main extends JPanel {
     }
 
     void updatePlayerMovement(long nowNanos) {
-        if (gameOver || won || hidden) {
+        if (gameOver || won || hidden || warningSettingsOpen) {
             clearMovementInput();
             return;
         }
@@ -1206,7 +1288,7 @@ final class Main extends JPanel {
 
     void movePlayer(int dx, int dy, boolean running, long nowNanos) {
 
-        if (gameOver || won) {
+        if (gameOver || won || warningSettingsOpen) {
             return;
         }
 
@@ -1745,8 +1827,8 @@ final class Main extends JPanel {
                 + a * (AWARE_HIGH_COLOR.getBlue() - AWARE_LOW_COLOR.getBlue()));
 
         // When it is hunting you the bar throbs
-        if (a >= 0.70) {
-            double pulse = 0.78 + 0.22 * Math.sin(now / 110.0);
+        if (a >= 0.70 && !WARNING_SETTINGS.reducedEffects) {
+            double pulse = 0.78 + 0.22 * warningCues.pulse();
             r = (int) (r * pulse);
             gr = (int) (gr * pulse);
             b = (int) (b * pulse);
@@ -2333,7 +2415,10 @@ final class Main extends JPanel {
 
     void updateGame() {
 
+        if (warningSettingsOpen) return;
+
         if (gameOver || won) {
+            updateWarningCues(System.currentTimeMillis());
             repaint();
             return;
         }
@@ -2357,6 +2442,7 @@ final class Main extends JPanel {
         updateMonster();
 
         updateAwareness(now); // after the AI has decided its new state
+        updateWarningCues(now);
 
         repaint();
     }
@@ -2390,6 +2476,7 @@ final class Main extends JPanel {
         noise = 0;
         awareness = 0;
         awarenessTarget = 0;
+        warningCues.reset();
         heardDistraction = false;
         lastNoiseText = "";
         lastSoundType = null;
@@ -2677,6 +2764,9 @@ final class Main extends JPanel {
             );
         }
 
+        // Warning edges are confined to the playfield; the HUD stays readable.
+        warningCues.draw(g2, COLS * TILE, ROWS * TILE);
+
         // Status panel
         int panelY = ROWS * TILE;
 
@@ -2719,7 +2809,7 @@ final class Main extends JPanel {
         );
 
         g2.drawString(
-                "E: Grab | Q: Throw | F: Hide | R: Restart",
+                "E: Grab | Q: Throw | F: Hide | R: Restart | P: Settings",
                 250, panelY + 54
         );
 
@@ -2827,7 +2917,259 @@ final class Main extends JPanel {
                     ROWS * TILE / 2 + 35
             );
         }
+        g2.dispose();
     }
+
+    // -------------------------------------------------
+    // WARNING AUDIO AND VISUALS (player feedback only)
+    // -------------------------------------------------
+
+    static final class WarningSettings {
+        volatile int volume = 55;
+        volatile boolean reducedEffects = false;
+    }
+
+    static void showWarningSettings(Component parent) {
+        JSlider volume = new JSlider(0, 100, WARNING_SETTINGS.volume);
+        volume.setMajorTickSpacing(25);
+        volume.setPaintTicks(true);
+        volume.setPaintLabels(true);
+        volume.setToolTipText("Zero mutes warning audio.");
+        JCheckBox reduced = new JCheckBox("Reduced visual effects",
+                WARNING_SETTINGS.reducedEffects);
+        JPanel options = new JPanel(new GridLayout(0, 1, 0, 8));
+        options.add(new JLabel("Warning volume (0 = muted)"));
+        options.add(volume);
+        options.add(reduced);
+        options.add(new JLabel("A quiet drone also signals a nearby monster."));
+        int answer = JOptionPane.showConfirmDialog(parent, options, "Warning Settings",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (answer == JOptionPane.OK_OPTION) {
+            WARNING_SETTINGS.volume = volume.getValue();
+            WARNING_SETTINGS.reducedEffects = reduced.isSelected();
+        }
+    }
+
+    record CueMix(double awareness, double proximity, double volume,
+                  boolean active, long sting, long generation) { }
+
+    static final class WarningCues {
+        final WarningAudio audio = new WarningAudio();
+        double awareness;
+        double beatPhase;
+        boolean active;
+        boolean highThreat;
+        long lastUpdate;
+        long lastSting;
+        long sting;
+        long generation;
+
+        static double clamp(double value) {
+            return Math.max(0, Math.min(1, value));
+        }
+
+        static double beat(double phase) {
+            if (phase < 0.12) return Math.pow(Math.sin(Math.PI * phase / 0.12), 2);
+            if (phase >= 0.18 && phase < 0.28) {
+                return 0.65 * Math.pow(Math.sin(Math.PI * (phase - 0.18) / 0.10), 2);
+            }
+            return 0;
+        }
+
+        void update(double level, double proximity, boolean enabled, long now) {
+            awareness = clamp(level);
+            active = enabled;
+            double seconds = lastUpdate == 0 ? 0
+                    : Math.max(0, Math.min(0.2, (now - lastUpdate) / 1000.0));
+            lastUpdate = now;
+            beatPhase = (beatPhase + seconds * (60 + 80 * awareness) / 60) % 1;
+            if (awareness < 0.55) highThreat = false;
+            if (awareness >= 0.70 && !highThreat) {
+                if (enabled && now - lastSting >= CUE_STING_COOLDOWN_MS) {
+                    sting++;
+                    lastSting = now;
+                }
+                highThreat = true;
+            }
+            audio.target = new CueMix(awareness, clamp(proximity),
+                    WARNING_SETTINGS.volume / 100.0, enabled, sting, generation);
+        }
+
+        void reset() {
+            awareness = 0;
+            beatPhase = 0;
+            active = false;
+            highThreat = false;
+            lastUpdate = 0;
+            lastSting = 0;
+            generation++;
+            audio.target = new CueMix(0, 0, 0, false, sting, generation);
+        }
+
+        double pulse() {
+            return audio.available() ? audio.pulse() : beat(beatPhase);
+        }
+
+        void draw(Graphics2D graphics, int width, int height) {
+            if (!active || awareness < 0.08) return;
+            boolean reduced = WARNING_SETTINGS.reducedEffects;
+            double pulse = pulse();
+            double strength = (awareness - 0.08) / 0.92;
+            int alpha = (int) Math.round(CUE_MAX_EDGE_ALPHA * strength
+                    * (reduced ? 0.45 : 0.75 + 0.25 * pulse));
+            int edge = Math.max(1, Math.min(width, height) / 6);
+            Color rim = new Color(150, 8, 25, alpha);
+            Color clear = new Color(150, 8, 25, 0);
+            Graphics2D g = (Graphics2D) graphics.create();
+            g.clipRect(0, 0, width, height);
+            g.setPaint(new GradientPaint(0, 0, rim, edge, 0, clear));
+            g.fillRect(0, 0, edge, height);
+            g.setPaint(new GradientPaint(width, 0, rim, width - edge, 0, clear));
+            g.fillRect(width - edge, 0, edge, height);
+            g.setPaint(new GradientPaint(0, 0, rim, 0, edge, clear));
+            g.fillRect(0, 0, width, edge);
+            g.setPaint(new GradientPaint(0, height, rim, 0, height - edge, clear));
+            g.fillRect(0, height - edge, width, edge);
+            g.dispose();
+        }
+    }
+
+    // Original procedural soundscape: no downloaded audio or additional libraries.
+    static final class CueSynth {
+        private final Random random = new Random(90210);
+        private double time;
+        private double phase;
+        private double awareness;
+        private double proximity;
+        private double gain;
+        private double hiss;
+        private double stingTime = -1;
+        private long seenSting = -1;
+        private long seenGeneration = -1;
+        double pulse;
+
+        void render(byte[] pcm, CueMix mix) {
+            if (mix.generation() != seenGeneration) {
+                awareness = proximity = gain = phase = time = hiss = 0;
+                stingTime = -1;
+                seenGeneration = mix.generation();
+                seenSting = mix.sting();
+            }
+            if (mix.sting() != seenSting) {
+                seenSting = mix.sting();
+                if (mix.active() && mix.volume() > 0) stingTime = 0;
+            }
+            if (!mix.active() || mix.volume() == 0) stingTime = -1;
+            double targetGain = mix.active() ? mix.volume() : 0;
+            for (int i = 0; i < pcm.length; i += 2) {
+                awareness += (mix.awareness() - awareness) / (CUE_SAMPLE_RATE * 0.06);
+                proximity += (mix.proximity() - proximity) / (CUE_SAMPLE_RATE * 0.25);
+                gain += (targetGain - gain) / (CUE_SAMPLE_RATE * 0.015);
+                time += 1.0 / CUE_SAMPLE_RATE;
+                phase = (phase + (60 + 80 * awareness) / (60 * CUE_SAMPLE_RATE)) % 1;
+                hiss = 0.87 * hiss + 0.13 * (random.nextDouble() * 2 - 1);
+                double drone = Math.sin(2 * Math.PI * 54 * time)
+                        + 0.35 * Math.sin(2 * Math.PI * 81 * time)
+                        + 0.20 * Math.sin(2 * Math.PI * 108 * time);
+                double nearby = 0.028 * proximity * (1 - awareness * 0.75)
+                        * (Math.sin(2 * Math.PI * 66 * time)
+                        * (0.7 + 0.3 * Math.sin(2 * Math.PI * 0.9 * time)) + 1.2 * hiss);
+                double heartbeat = 0.22 * Math.max(0, (awareness - 0.25) / 0.75)
+                        * WarningCues.beat(phase) * Math.sin(2 * Math.PI * 68 * time);
+                double sample = (0.006 + 0.055 * awareness) * drone + nearby + heartbeat
+                        + (0.012 * awareness + 0.025 * awareness * awareness) * hiss;
+                if (stingTime >= 0) {
+                    sample += 0.12 * Math.min(1, stingTime / 0.015)
+                            * Math.exp(-6 * stingTime)
+                            * (Math.sin(2 * Math.PI * (220 * stingTime
+                            - 70 * stingTime * stingTime)) + 0.3 * hiss);
+                    stingTime += 1.0 / CUE_SAMPLE_RATE;
+                    if (stingTime >= 0.8) stingTime = -1;
+                }
+                // Smooth gain changes avoid clicks; muted output becomes exact silence.
+                double output = gain < 0.00001 ? 0 : sample * gain;
+                short value = (short) Math.round(Math.max(-0.9, Math.min(0.9, output)) * 32767);
+                pcm[i] = (byte) value;
+                pcm[i + 1] = (byte) (value >> 8);
+            }
+            pulse = WarningCues.beat(phase);
+        }
+    }
+
+    static final class WarningAudio implements AutoCloseable {
+        static final AudioFormat FORMAT = new AudioFormat(CUE_SAMPLE_RATE, 16, 1, true, false);
+        volatile CueMix target = new CueMix(0, 0, 0, false, 0, 0);
+        private volatile AudioSession session;
+
+        synchronized void start() {
+            if (session != null || GraphicsEnvironment.isHeadless()) return;
+            AudioSession next = new AudioSession();
+            session = next;
+            Thread worker = new Thread(next, "DeadSignal-warning-audio");
+            worker.setDaemon(true);
+            worker.start();
+        }
+
+        boolean available() {
+            AudioSession current = session;
+            return current != null && current.available;
+        }
+
+        double pulse() {
+            AudioSession current = session;
+            return current == null ? 0 : current.pulse;
+        }
+
+        @Override
+        public synchronized void close() {
+            AudioSession current = session;
+            session = null;
+            if (current != null) current.running = false;
+        }
+
+        private final class AudioSession implements Runnable {
+            volatile boolean running = true;
+            volatile boolean available;
+            volatile double pulse;
+
+            @Override
+            public void run() {
+                SourceDataLine line = null;
+                try {
+                    line = AudioSystem.getSourceDataLine(FORMAT);
+                    line.open(FORMAT, 4096);
+                    if (!running) return;
+                    line.start();
+                    available = true;
+                    CueSynth synth = new CueSynth();
+                    byte[] block = new byte[1024];
+                    while (running) {
+                        synth.render(block, target);
+                        pulse = synth.pulse;
+                        int offset = 0;
+                        while (running && offset < block.length) {
+                            int written = line.write(block, offset, block.length - offset);
+                            if (written <= 0) break;
+                            offset += written;
+                        }
+                    }
+                } catch (LineUnavailableException | IllegalArgumentException | SecurityException ex) {
+                    System.err.println("Warning audio unavailable; visual cues remain active: "
+                            + ex.getMessage());
+                } finally {
+                    available = false;
+                    if (line != null) {
+                        if (line.isOpen()) {
+                            line.stop();
+                            line.flush();
+                        }
+                        line.close();
+                    }
+                }
+            }
+        }
+    }
+
 
     // -------------------------------------------------
     // MAIN MENU
@@ -2901,9 +3243,7 @@ final class Main extends JPanel {
 
             JButton settings = createButton("SETTINGS");
             buttons.add(settings);
-            settings.addActionListener(e -> JOptionPane.showMessageDialog(
-                    frame, "GAME SETTINGS\n\nSound: ON\nDifficulty: NORMAL\nDisplay: WINDOWED",
-                    "SETTINGS", JOptionPane.PLAIN_MESSAGE));
+            settings.addActionListener(e -> showWarningSettings(frame));
 
             JButton credits = createButton("CREDITS");
             buttons.add(credits);
