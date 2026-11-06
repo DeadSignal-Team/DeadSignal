@@ -5,6 +5,7 @@ import javax.swing.Timer; // Fixes the ambiguity with java.util.Timer
 import java.awt.*;
 import java.awt.event.*;
 import java.util.*;
+import java.util.function.LongSupplier;
 import java.io.*;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -560,6 +561,21 @@ final class Main extends JPanel {
     long nextShiftAt;
     long lastMonsterMove = 0;
     long lastPlayerMove = 0;
+    long lastPlayerStepNanos = 0;
+    boolean playerHasStepped = false;
+    final LongSupplier movementClock;
+
+    final LinkedHashMap<Integer, Point> heldMovementKeys = new LinkedHashMap<>();
+    boolean runningHeld = false;
+    final Timer movementTimer = new Timer(16, e -> updatePlayerMovement());
+    final Timer gameTimer = new Timer(50, e -> updateGame());
+    Window movementWindow;
+    final WindowAdapter movementFocusListener = new WindowAdapter() {
+        @Override
+        public void windowLostFocus(WindowEvent e) {
+            clearMovementInput();
+        }
+    };
 
     String message = "Find the keycard and escape!";
     MonsterState monsterState = MonsterState.PATROLLING;
@@ -577,7 +593,6 @@ final class Main extends JPanel {
     double awarenessTarget = 0;
     long lastAwareUpdate = 0;
     final WarningCues warningCues = new WarningCues();
-    final Timer gameTimer = new Timer(50, e -> updateGame());
     boolean warningSettingsOpen = false;
     // True when the monster is investigating a THROWN item, not the player
     boolean heardDistraction = false;
@@ -590,6 +605,11 @@ final class Main extends JPanel {
     Random random = DEBUG ? new Random(SEED) : new Random();
 
     public Main() {
+        this(System::nanoTime);
+    }
+
+    Main(LongSupplier movementClock) {
+        this.movementClock = movementClock;
         setPreferredSize(new Dimension(
                 COLS * TILE, ROWS * TILE + PANEL_H
         ));
@@ -601,19 +621,31 @@ final class Main extends JPanel {
 
         restartGame(); // builds the first game
 
-        // Timer and audio start only when the game is attached to its window.
+        // Timers and audio start only when the game panel is attached.
     }
 
     @Override
     public void addNotify() {
         super.addNotify();
+        clearMovementInput();
+        movementWindow = SwingUtilities.getWindowAncestor(this);
+        if (movementWindow != null) {
+            movementWindow.addWindowFocusListener(movementFocusListener);
+        }
+        movementTimer.start();
         warningCues.audio.start();
         gameTimer.start();
     }
 
     @Override
     public void removeNotify() {
+        movementTimer.stop();
         gameTimer.stop();
+        clearMovementInput();
+        if (movementWindow != null) {
+            movementWindow.removeWindowFocusListener(movementFocusListener);
+            movementWindow = null;
+        }
         warningCues.audio.close();
         super.removeNotify();
     }
@@ -635,33 +667,54 @@ final class Main extends JPanel {
 
     void openWarningSettings() {
         if (warningSettingsOpen) return;
-        warningSettingsOpen = true;
-        boolean resumeTimer = gameTimer.isRunning();
-        gameTimer.stop();
-        long openedAt = System.currentTimeMillis();
-        warningCues.update(awareness, nearbyMonsterLevel(), false, openedAt);
+        WarningPause pause = pauseWarningSettings();
         try {
             showWarningSettings(this);
         } finally {
-            long now = System.currentTimeMillis();
-            long paused = now - openedAt;
-            nextShiftAt += paused;
-            lastNoiseUpdate += paused;
-            lastAwareUpdate += paused;
-            lastMonsterMove += paused;
-            lastPlayerMove += paused;
-            lastNoiseTextTime += paused;
-            Queue<SoundEvent> pausedSounds = new LinkedList<>();
-            for (SoundEvent sound : soundQueue) {
-                pausedSounds.add(new SoundEvent(sound.type, sound.x, sound.y,
-                        sound.loudness, sound.byPlayer, sound.time + paused));
-            }
-            soundQueue = pausedSounds;
-            warningSettingsOpen = false;
-            updateWarningCues(now);
-            if (resumeTimer && isDisplayable()) gameTimer.start();
-            repaint();
+            resumeWarningSettings(pause);
         }
+    }
+
+    record WarningPause(long openedAt, long movementAt,
+                        boolean gameTimerRunning, boolean movementTimerRunning) { }
+
+    WarningPause pauseWarningSettings() {
+        WarningPause pause = new WarningPause(System.currentTimeMillis(),
+                movementClock.getAsLong(), gameTimer.isRunning(), movementTimer.isRunning());
+        warningSettingsOpen = true;
+        movementTimer.stop();
+        gameTimer.stop();
+        clearMovementInput();
+        warningCues.update(awareness, nearbyMonsterLevel(), false, pause.openedAt());
+        return pause;
+    }
+
+    void resumeWarningSettings(WarningPause pause) {
+        long now = System.currentTimeMillis();
+        long paused = Math.max(0, now - pause.openedAt());
+        nextShiftAt += paused;
+        lastNoiseUpdate += paused;
+        lastAwareUpdate += paused;
+        lastMonsterMove += paused;
+        lastPlayerMove += paused;
+        lastNoiseTextTime += paused;
+        if (playerHasStepped) {
+            lastPlayerStepNanos += Math.max(0, movementClock.getAsLong() - pause.movementAt());
+        }
+        Queue<SoundEvent> pausedSounds = new LinkedList<>();
+        for (SoundEvent sound : soundQueue) {
+            pausedSounds.add(new SoundEvent(sound.type, sound.x, sound.y,
+                    sound.loudness, sound.byPlayer, sound.time + paused));
+        }
+        soundQueue = pausedSounds;
+        clearMovementInput();
+        warningSettingsOpen = false;
+        updateWarningCues(now);
+        if (isDisplayable()) {
+            if (pause.movementTimerRunning()) movementTimer.start();
+            if (pause.gameTimerRunning()) gameTimer.start();
+        }
+        repaint();
     }
 
     // -------------------------------------------------
@@ -1115,25 +1168,23 @@ final class Main extends JPanel {
 
     void setupControls() {
 
-        bind("W", 0, -1, false);
-        bind("A", -1, 0, false);
-        bind("S", 0, 1, false);
-        bind("D", 1, 0, false);
+        bindMovementKey(KeyEvent.VK_W, 0, -1);
+        bindMovementKey(KeyEvent.VK_A, -1, 0);
+        bindMovementKey(KeyEvent.VK_S, 0, 1);
+        bindMovementKey(KeyEvent.VK_D, 1, 0);
+        bindMovementKey(KeyEvent.VK_UP, 0, -1);
+        bindMovementKey(KeyEvent.VK_LEFT, -1, 0);
+        bindMovementKey(KeyEvent.VK_DOWN, 0, 1);
+        bindMovementKey(KeyEvent.VK_RIGHT, 1, 0);
 
-        bind("UP", 0, -1, false);
-        bind("LEFT", -1, 0, false);
-        bind("DOWN", 0, 1, false);
-        bind("RIGHT", 1, 0, false);
-
-        bind("shift W", 0, -1, true);
-        bind("shift A", -1, 0, true);
-        bind("shift S", 0, 1, true);
-        bind("shift D", 1, 0, true);
-
-        bind("shift UP", 0, -1, true);
-        bind("shift LEFT", -1, 0, true);
-        bind("shift DOWN", 0, 1, true);
-        bind("shift RIGHT", 1, 0, true);
+        bindModifierVariants(KeyEvent.VK_SHIFT, false, "run-pressed", () -> {
+            runningHeld = true;
+            updatePlayerMovement();
+        });
+        bindModifierVariants(KeyEvent.VK_SHIFT, true, "run-released", () -> {
+            runningHeld = false;
+            updatePlayerMovement();
+        });
 
         bindAction("E", "grab", this::grabItem);
         bindAction("Q", "throw", this::throwItem);
@@ -1149,9 +1200,13 @@ final class Main extends JPanel {
     }
 
     void bindAction(String key, String name, Runnable action) {
+        bindAction(KeyStroke.getKeyStroke(key), name, action);
+    }
+
+    void bindAction(KeyStroke key, String name, Runnable action) {
 
         getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
-                KeyStroke.getKeyStroke(key), name
+                key, name
         );
 
         getActionMap().put(name, new AbstractAction() {
@@ -1162,23 +1217,78 @@ final class Main extends JPanel {
         });
     }
 
-    void bind(String key, int dx, int dy, boolean running) {
-
-        getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
-                KeyStroke.getKeyStroke(key), key
-        );
-
-        getActionMap().put(key, new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                movePlayer(dx, dy, running);
-            }
+    void bindMovementKey(int keyCode, int dx, int dy) {
+        for (int modifiers : new int[] {0, InputEvent.SHIFT_DOWN_MASK}) {
+            boolean running = modifiers != 0;
+            bindAction(KeyStroke.getKeyStroke(keyCode, modifiers, false),
+                    "move-pressed-" + keyCode + "-" + modifiers, () -> {
+                if (gameOver || won || hidden || warningSettingsOpen) {
+                    clearMovementInput();
+                    return;
+                }
+                runningHeld = running;
+                // Keyboard repeat must not change which direction was pressed last.
+                if (!heldMovementKeys.containsKey(keyCode)) {
+                    heldMovementKeys.put(keyCode, new Point(dx, dy));
+                    updatePlayerMovement();
+                }
+            });
+        }
+        bindModifierVariants(keyCode, true, "move-released-" + keyCode, () -> {
+            heldMovementKeys.remove(keyCode);
+            updatePlayerMovement();
         });
     }
 
-    void movePlayer(int dx, int dy, boolean running) {
+    void bindModifierVariants(int keyCode, boolean released, String name,
+                              Runnable action) {
+        bindAction(KeyStroke.getKeyStroke(keyCode, 0, released), name, action);
+        // A modifier may change before a held key is released.
+        int[] masks = {InputEvent.SHIFT_DOWN_MASK, InputEvent.CTRL_DOWN_MASK,
+                InputEvent.ALT_DOWN_MASK, InputEvent.META_DOWN_MASK,
+                InputEvent.ALT_GRAPH_DOWN_MASK};
+        for (int combination = 1; combination < (1 << masks.length); combination++) {
+            int modifiers = 0;
+            for (int bit = 0; bit < masks.length; bit++) {
+                if ((combination & (1 << bit)) != 0) {
+                    modifiers |= masks[bit];
+                }
+            }
+            getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
+                    KeyStroke.getKeyStroke(keyCode, modifiers, released), name);
+        }
+    }
 
-        if (gameOver || won) {
+    void clearMovementInput() {
+        heldMovementKeys.clear();
+        runningHeld = false;
+    }
+
+    void updatePlayerMovement() {
+        updatePlayerMovement(movementClock.getAsLong());
+    }
+
+    void updatePlayerMovement(long nowNanos) {
+        if (gameOver || won || hidden || warningSettingsOpen) {
+            clearMovementInput();
+            return;
+        }
+        Point direction = null;
+        for (Point heldDirection : heldMovementKeys.values()) {
+            direction = heldDirection;
+        }
+        if (direction != null) {
+            movePlayer(direction.x, direction.y, runningHeld, nowNanos);
+        }
+    }
+
+    void movePlayer(int dx, int dy, boolean running) {
+        movePlayer(dx, dy, running, movementClock.getAsLong());
+    }
+
+    void movePlayer(int dx, int dy, boolean running, long nowNanos) {
+
+        if (gameOver || won || warningSettingsOpen) {
             return;
         }
 
@@ -1189,14 +1299,12 @@ final class Main extends JPanel {
         }
 
         // Movement cooldown: running is faster but louder
-        long now = System.currentTimeMillis();
         long cooldown = running ? RUN_COOLDOWN : WALK_COOLDOWN;
 
-        if (now - lastPlayerMove < cooldown) {
+        if (playerHasStepped &&
+                nowNanos - lastPlayerStepNanos < cooldown * 1_000_000L) {
             return;
         }
-
-        lastPlayerMove = now;
 
         faceX = dx;
         faceY = dy;
@@ -1212,6 +1320,9 @@ final class Main extends JPanel {
 
         playerX = nx;
         playerY = ny;
+        lastPlayerStepNanos = nowNanos;
+        playerHasStepped = true;
+        lastPlayerMove = System.currentTimeMillis();
 
         // Every step makes a sound; the player is never told if it was heard
         emitSound(running ? SoundType.RUN : SoundType.WALK,
@@ -1244,6 +1355,9 @@ final class Main extends JPanel {
         }
 
         checkCollision();
+        if (gameOver || won) {
+            clearMovementInput();
+        }
         repaint();
     }
 
@@ -1391,6 +1505,7 @@ final class Main extends JPanel {
         }
 
         hidden = true;
+        clearMovementInput();
         emitSound(SoundType.LOCKER, playerX, playerY);
         message = "You hide in the locker. Stay quiet...";
         repaint();
@@ -2334,6 +2449,8 @@ final class Main extends JPanel {
 
     void restartGame() {
 
+        clearMovementInput();
+
         buildMap(); // new hallway lengths, rooms and connections
 
         playerX = roomTile(0, 1, 1)[0];
@@ -2388,6 +2505,8 @@ final class Main extends JPanel {
         lastAwareUpdate = now;
         lastMonsterMove = now;
         lastPlayerMove = 0;
+        lastPlayerStepNanos = 0;
+        playerHasStepped = false;
 
         message = "Find the keycard and escape!";
 
@@ -3057,63 +3176,83 @@ final class Main extends JPanel {
     // -------------------------------------------------
 
     static class MainMenuPanel extends JPanel {
+        private static final int DESIGN_WIDTH = 840;
+        private static final int DESIGN_HEIGHT = 688;
+        private static final int TEXT_WIDTH = 600;
+        private static final int BUTTON_WIDTH = 250;
+        private static final int BUTTON_HEIGHT = 45;
+        private static final int BUTTON_GAP = 10;
+        private static final double MIN_UI_SCALE = 0.80;
+        private static final double MAX_UI_SCALE = 1.60;
+        private static final int[] MOUNTAIN_X =
+                {0, 90, 180, 270, 360, 450, 540, 630, 720, 840};
+        private static final int[] MOUNTAIN_Y =
+                {390, 270, 350, 240, 370, 280, 360, 250, 340, 270};
+
         private final Color red = new Color(170, 25, 38);
-        private final Random random = new Random();
         private final JFrame frame;
+        private final JPanel menuColumn = new JPanel();
+        private final GridLayout buttonLayout = new GridLayout(5, 1);
+        private final JPanel buttons = new JPanel(buttonLayout);
+        private final JLabel title;
+        private final JLabel subtitle;
+        private final JLabel status;
+        private final JLabel developer;
+        private final int[] fogX = new int[35];
+        private final int[] fogY = new int[35];
+        private double appliedScale = -1;
+        private int appliedTextWidth = -1;
 
         MainMenuPanel(JFrame frame) {
             this.frame = frame;
-            setPreferredSize(new Dimension(COLS * TILE, ROWS * TILE + PANEL_H));
-            setLayout(null);
+            setPreferredSize(new Dimension(DESIGN_WIDTH, DESIGN_HEIGHT));
+            setLayout(new BorderLayout());
             setBackground(Color.BLACK);
 
-            JLabel title = new JLabel("DEAD SIGNAL");
-            title.setBounds(120, 95, 600, 75);
-            title.setForeground(new Color(190, 35, 45));
-            title.setFont(new Font("Monospaced", Font.BOLD, 43));
-            title.setHorizontalAlignment(SwingConstants.CENTER);
-            add(title);
+            menuColumn.setOpaque(false);
+            menuColumn.setLayout(new BoxLayout(menuColumn, BoxLayout.Y_AXIS));
+            buttons.setOpaque(false);
+            buttons.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-            JLabel subtitle = new JLabel("THE LAST NIGHT");
-            subtitle.setBounds(120, 165, 600, 30);
-            subtitle.setForeground(new Color(160, 160, 160));
-            subtitle.setFont(new Font("Monospaced", Font.PLAIN, 17));
-            subtitle.setHorizontalAlignment(SwingConstants.CENTER);
-            add(subtitle);
+            title = createLabel("DEAD SIGNAL", new Color(190, 35, 45));
+            subtitle = createLabel("THE LAST NIGHT", new Color(160, 160, 160));
+            status = createLabel("YOUR NIGHTMARE IS WAITING...", new Color(115, 115, 125));
+            menuColumn.add(title);
+            menuColumn.add(subtitle);
+            menuColumn.add(status);
+            menuColumn.add(buttons);
 
-            JLabel status = new JLabel("YOUR NIGHTMARE IS WAITING...");
-            status.setBounds(120, 205, 600, 25);
-            status.setForeground(new Color(115, 115, 125));
-            status.setFont(new Font("Monospaced", Font.PLAIN, 11));
-            status.setHorizontalAlignment(SwingConstants.CENTER);
-            add(status);
+            // Center the whole column using the current window's content area.
+            JPanel center = new JPanel(new GridBagLayout());
+            center.setOpaque(false);
+            center.add(menuColumn);
+            add(center, BorderLayout.CENTER);
+
+            developer = createLabel("A GROUP 2 PRODUCTION | VERSION 1.0",
+                    new Color(95, 95, 105));
+            add(developer, BorderLayout.SOUTH);
 
             JButton newGame = createButton("NEW GAME");
-            newGame.setBounds(295, 270, 250, 45);
-            add(newGame);
+            buttons.add(newGame);
             newGame.addActionListener(e -> startGame());
 
             JButton continueGame = createButton("CONTINUE");
-            continueGame.setBounds(295, 325, 250, 45);
-            add(continueGame);
+            buttons.add(continueGame);
             continueGame.addActionListener(e -> JOptionPane.showMessageDialog(
                     frame, "No saved game found.", "CONTINUE", JOptionPane.WARNING_MESSAGE));
 
             JButton settings = createButton("SETTINGS");
-            settings.setBounds(295, 380, 250, 45);
-            add(settings);
+            buttons.add(settings);
             settings.addActionListener(e -> showWarningSettings(frame));
 
             JButton credits = createButton("CREDITS");
-            credits.setBounds(295, 435, 250, 45);
-            add(credits);
+            buttons.add(credits);
             credits.addActionListener(e -> JOptionPane.showMessageDialog(
                     frame, "DEAD SIGNAL\n\nDeveloped by Group 2\n\nThank you for playing.",
                     "CREDITS", JOptionPane.INFORMATION_MESSAGE));
 
             JButton exit = createButton("EXIT GAME");
-            exit.setBounds(295, 490, 250, 45);
-            add(exit);
+            buttons.add(exit);
             exit.addActionListener(e -> {
                 int answer = JOptionPane.showConfirmDialog(frame,
                         "Are you sure you want to leave the nightmare?", "EXIT GAME",
@@ -3121,12 +3260,84 @@ final class Main extends JPanel {
                 if (answer == JOptionPane.YES_OPTION) System.exit(0);
             });
 
-            JLabel developer = new JLabel("A GROUP 2 PRODUCTION | VERSION 1.0");
-            developer.setBounds(120, 635, 600, 20);
-            developer.setForeground(new Color(95, 95, 105));
-            developer.setFont(new Font("Monospaced", Font.PLAIN, 10));
-            developer.setHorizontalAlignment(SwingConstants.CENTER);
-            add(developer);
+            // Keep the existing atmosphere stable when buttons repaint on hover.
+            Random random = new Random();
+            for (int i = 0; i < fogX.length; i++) {
+                fogX[i] = random.nextInt(DESIGN_WIDTH);
+                fogY[i] = 420 + random.nextInt(250);
+            }
+            updateResponsiveSizes(DESIGN_WIDTH, DESIGN_HEIGHT);
+        }
+
+        private JLabel createLabel(String text, Color color) {
+            JLabel label = new JLabel(text, SwingConstants.CENTER);
+            label.setForeground(color);
+            label.setAlignmentX(Component.CENTER_ALIGNMENT);
+            return label;
+        }
+
+        private static int scaled(int value, double scale) {
+            return Math.max(1, (int) Math.round(value * scale));
+        }
+
+        private void sizeLabel(JLabel label, int fontSize, int fontStyle,
+                               int width, int topGap, int bottomGap, double scale) {
+            label.setFont(new Font("Monospaced", fontStyle, scaled(fontSize, scale)));
+            int top = (int) Math.round(topGap * scale);
+            int bottom = (int) Math.round(bottomGap * scale);
+            label.setBorder(BorderFactory.createEmptyBorder(top, 0, bottom, 0));
+            int height = label.getFontMetrics(label.getFont()).getHeight() + top + bottom;
+            Dimension size = new Dimension(width, height);
+            label.setPreferredSize(size);
+            label.setMinimumSize(size);
+            label.setMaximumSize(size);
+        }
+
+        private void updateResponsiveSizes(int width, int height) {
+            double scale = Math.max(MIN_UI_SCALE, Math.min(MAX_UI_SCALE,
+                    Math.min((double) width / DESIGN_WIDTH,
+                            (double) height / DESIGN_HEIGHT)));
+            int padding = scaled(24, scale);
+            int textWidth = Math.max(1,
+                    Math.min(scaled(TEXT_WIDTH, scale), width - padding * 2));
+            if (scale == appliedScale && textWidth == appliedTextWidth) {
+                return;
+            }
+            appliedScale = scale;
+            appliedTextWidth = textWidth;
+
+            setBorder(BorderFactory.createEmptyBorder(
+                    scaled(16, scale), padding, scaled(20, scale), padding));
+            sizeLabel(title, 43, Font.BOLD, textWidth, 0, 0, scale);
+            sizeLabel(subtitle, 17, Font.PLAIN, textWidth, 8, 0, scale);
+            sizeLabel(status, 11, Font.PLAIN, textWidth, 18, 44, scale);
+
+            int buttonWidth = Math.min(textWidth, scaled(BUTTON_WIDTH, scale));
+            int buttonHeight = scaled(BUTTON_HEIGHT, scale);
+            int gap = scaled(BUTTON_GAP, scale);
+            buttonLayout.setVgap(gap);
+            for (Component button : buttons.getComponents()) {
+                button.setFont(new Font("Monospaced", Font.BOLD, scaled(15, scale)));
+            }
+            Dimension buttonSize = new Dimension(buttonWidth,
+                    buttons.getComponentCount() * buttonHeight
+                            + (buttons.getComponentCount() - 1) * gap);
+            buttons.setPreferredSize(buttonSize);
+            buttons.setMinimumSize(buttonSize);
+            buttons.setMaximumSize(buttonSize);
+
+            developer.setFont(new Font("Monospaced", Font.PLAIN, scaled(10, scale)));
+            developer.setBorder(BorderFactory.createEmptyBorder(scaled(24, scale), 0, 0, 0));
+
+            // Refresh cached child sizes before the centering layout runs.
+            buttons.invalidate();
+            menuColumn.invalidate();
+        }
+
+        @Override
+        public void doLayout() {
+            updateResponsiveSizes(getWidth(), getHeight());
+            super.doLayout();
         }
 
         private void startGame() {
@@ -3161,28 +3372,47 @@ final class Main extends JPanel {
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
+            int width = getWidth();
+            int height = getHeight();
+            if (width <= 0 || height <= 0) {
+                return;
+            }
             Graphics2D g2 = (Graphics2D) g.create();
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g2.setPaint(new GradientPaint(0, 0, new Color(5, 7, 13),
-                    0, getHeight(), new Color(24, 13, 18)));
-            g2.fillRect(0, 0, getWidth(), getHeight());
+                    0, height, new Color(24, 13, 18)));
+            g2.fillRect(0, 0, width, height);
+
+            double scaleX = (double) width / DESIGN_WIDTH;
+            double scaleY = (double) height / DESIGN_HEIGHT;
+            // Scale the moon uniformly, even on a very wide display.
+            int moonSize = scaled(90, Math.min(scaleX, scaleY));
             g2.setColor(new Color(180, 180, 190, 35));
-            g2.fillOval(640, 65, 90, 90);
+            g2.fillOval((int) Math.round(640 * scaleX),
+                    (int) Math.round(65 * scaleY), moonSize, moonSize);
+
             g2.setColor(new Color(15, 17, 23));
-            int[] x = {0, 90, 180, 270, 360, 450, 540, 630, 720, 840};
-            int[] y = {390, 270, 350, 240, 370, 280, 360, 250, 340, 270};
+            int[] x = new int[MOUNTAIN_X.length];
+            int[] y = new int[MOUNTAIN_Y.length];
+            for (int i = 0; i < x.length; i++) {
+                x[i] = (int) Math.round(MOUNTAIN_X[i] * scaleX);
+                y[i] = (int) Math.round(MOUNTAIN_Y[i] * scaleY);
+            }
             g2.fillPolygon(x, y, x.length);
+
+            int groundY = (int) Math.round(430 * scaleY);
             g2.setColor(new Color(12, 12, 17));
-            g2.fillRect(0, 430, 840, 258);
+            g2.fillRect(0, groundY, width, height - groundY);
             g2.setColor(new Color(80, 20, 27, 80));
-            for (int i = 0; i < 35; i++) {
-                int fx = random.nextInt(840);
-                int fy = 420 + random.nextInt(250);
-                g2.fillOval(fx, fy, 80, 3);
+            for (int i = 0; i < fogX.length; i++) {
+                g2.fillOval((int) Math.round(fogX[i] * scaleX),
+                        (int) Math.round(fogY[i] * scaleY),
+                        scaled(80, scaleX), scaled(3, scaleY));
             }
             g2.setColor(new Color(120, 20, 30, 35));
-            g2.fillRect(0, 0, 840, 3);
-            g2.fillRect(0, 685, 840, 3);
+            int edgeHeight = scaled(3, scaleY);
+            g2.fillRect(0, 0, width, edgeHeight);
+            g2.fillRect(0, height - edgeHeight, width, edgeHeight);
             g2.dispose();
         }
     }

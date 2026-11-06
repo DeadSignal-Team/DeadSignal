@@ -1,6 +1,9 @@
 package com.mycompany.deadsignal;
 
 import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.util.Arrays;
@@ -10,6 +13,8 @@ import javax.sound.sampled.AudioFileFormat;
 import javax.sound.sampled.AudioSystem;
 import java.io.ByteArrayInputStream;
 import javax.swing.SwingUtilities;
+import javax.swing.JComponent;
+import javax.swing.KeyStroke;
 
 public class WarningCuesCheck {
     static void require(boolean value, String message) {
@@ -41,7 +46,48 @@ public class WarningCuesCheck {
     static int[] pixels(BufferedImage image) {
         return image.getRGB(0, 0, image.getWidth(), image.getHeight(), null, 0, image.getWidth());
     }
+    static void press(Main game, int code, int modifiers) {
+        Object action = game.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .get(KeyStroke.getKeyStroke(code, modifiers, false));
+        require(action != null, "Missing movement binding");
+        game.getActionMap().get(action).actionPerformed(
+                new ActionEvent(game, ActionEvent.ACTION_PERFORMED, String.valueOf(action)));
+    }
+    static void checkSettingsMovement() {
+        long[] clock = {1_000_000_000L};
+        Main game = new Main(() -> clock[0]);
+        for (char[] row : game.map) Arrays.fill(row, '.');
+        game.playerX = 5;
+        game.playerY = 5;
+        game.monsterX = Main.COLS - 2;
+        game.monsterY = Main.ROWS - 2;
+        press(game, KeyEvent.VK_W, InputEvent.SHIFT_DOWN_MASK);
+        require(game.playerX == 5 && game.playerY == 4, "Movement setup failed");
+        game.movementTimer.start();
+        game.gameTimer.start();
+        Main.WarningPause pause = game.pauseWarningSettings();
+        require(!game.movementTimer.isRunning() && !game.gameTimer.isRunning(),
+                "Settings leave a gameplay timer running");
+        require(game.heldMovementKeys.isEmpty() && !game.runningHeld,
+                "Settings retain held movement");
+        clock[0] += 2_000_000_000L;
+        press(game, KeyEvent.VK_D, 0);
+        game.updatePlayerMovement();
+        require(game.playerX == 5 && game.playerY == 4 && game.heldMovementKeys.isEmpty(),
+                "Player moves or queues input while settings are open");
+        game.resumeWarningSettings(pause);
+        game.updatePlayerMovement();
+        require(game.playerX == 5 && game.playerY == 4, "Held movement resumes after settings");
+        press(game, KeyEvent.VK_D, 0);
+        require(game.playerX == 5 && game.playerY == 4, "Settings bypass movement cooldown");
+        clock[0] += 250_000_000L;
+        game.updatePlayerMovement();
+        require(game.playerX == 6 && game.playerY == 4, "Fresh movement fails after settings");
+        game.removeNotify();
+        System.out.println("PASS warning settings pause both timers, clear input, and preserve movement timing");
+    }
     static void verifyGraphics(File directory) throws Exception {
+        checkSettingsMovement();
         Main.WarningCues cues = new Main.WarningCues();
         cues.update(0, 1, true, 10000);
         BufferedImage quiet = overlay(cues);
