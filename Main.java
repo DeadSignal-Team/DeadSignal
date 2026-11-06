@@ -5,6 +5,7 @@ import javax.swing.Timer; // Fixes the ambiguity with java.util.Timer
 import java.awt.*;
 import java.awt.event.*;
 import java.util.*;
+import java.util.function.LongSupplier;
 import java.io.*;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -550,6 +551,21 @@ final class Main extends JPanel {
     long nextShiftAt;
     long lastMonsterMove = 0;
     long lastPlayerMove = 0;
+    long lastPlayerStepNanos = 0;
+    boolean playerHasStepped = false;
+    final LongSupplier movementClock;
+
+    final LinkedHashMap<Integer, Point> heldMovementKeys = new LinkedHashMap<>();
+    boolean runningHeld = false;
+    final Timer movementTimer = new Timer(16, e -> updatePlayerMovement());
+    final Timer gameTimer = new Timer(50, e -> updateGame());
+    Window movementWindow;
+    final WindowAdapter movementFocusListener = new WindowAdapter() {
+        @Override
+        public void windowLostFocus(WindowEvent e) {
+            clearMovementInput();
+        }
+    };
 
     String message = "Find the keycard and escape!";
     MonsterState monsterState = MonsterState.PATROLLING;
@@ -577,6 +593,11 @@ final class Main extends JPanel {
     Random random = DEBUG ? new Random(SEED) : new Random();
 
     public Main() {
+        this(System::nanoTime);
+    }
+
+    Main(LongSupplier movementClock) {
+        this.movementClock = movementClock;
         setPreferredSize(new Dimension(
                 COLS * TILE, ROWS * TILE + PANEL_H
         ));
@@ -588,9 +609,31 @@ final class Main extends JPanel {
 
         restartGame(); // builds the first game
 
-        // Main game timer (50 ms gives accurate monster timing)
-        Timer timer = new Timer(50, e -> updateGame());
-        timer.start();
+        // Timers start when the game panel is attached to the window.
+    }
+
+    @Override
+    public void addNotify() {
+        super.addNotify();
+        clearMovementInput();
+        movementWindow = SwingUtilities.getWindowAncestor(this);
+        if (movementWindow != null) {
+            movementWindow.addWindowFocusListener(movementFocusListener);
+        }
+        movementTimer.start();
+        gameTimer.start();
+    }
+
+    @Override
+    public void removeNotify() {
+        movementTimer.stop();
+        gameTimer.stop();
+        clearMovementInput();
+        if (movementWindow != null) {
+            movementWindow.removeWindowFocusListener(movementFocusListener);
+            movementWindow = null;
+        }
+        super.removeNotify();
     }
 
     // -------------------------------------------------
@@ -1044,25 +1087,23 @@ final class Main extends JPanel {
 
     void setupControls() {
 
-        bind("W", 0, -1, false);
-        bind("A", -1, 0, false);
-        bind("S", 0, 1, false);
-        bind("D", 1, 0, false);
+        bindMovementKey(KeyEvent.VK_W, 0, -1);
+        bindMovementKey(KeyEvent.VK_A, -1, 0);
+        bindMovementKey(KeyEvent.VK_S, 0, 1);
+        bindMovementKey(KeyEvent.VK_D, 1, 0);
+        bindMovementKey(KeyEvent.VK_UP, 0, -1);
+        bindMovementKey(KeyEvent.VK_LEFT, -1, 0);
+        bindMovementKey(KeyEvent.VK_DOWN, 0, 1);
+        bindMovementKey(KeyEvent.VK_RIGHT, 1, 0);
 
-        bind("UP", 0, -1, false);
-        bind("LEFT", -1, 0, false);
-        bind("DOWN", 0, 1, false);
-        bind("RIGHT", 1, 0, false);
-
-        bind("shift W", 0, -1, true);
-        bind("shift A", -1, 0, true);
-        bind("shift S", 0, 1, true);
-        bind("shift D", 1, 0, true);
-
-        bind("shift UP", 0, -1, true);
-        bind("shift LEFT", -1, 0, true);
-        bind("shift DOWN", 0, 1, true);
-        bind("shift RIGHT", 1, 0, true);
+        bindModifierVariants(KeyEvent.VK_SHIFT, false, "run-pressed", () -> {
+            runningHeld = true;
+            updatePlayerMovement();
+        });
+        bindModifierVariants(KeyEvent.VK_SHIFT, true, "run-released", () -> {
+            runningHeld = false;
+            updatePlayerMovement();
+        });
 
         bindAction("E", "grab", this::grabItem);
         bindAction("Q", "throw", this::throwItem);
@@ -1077,9 +1118,13 @@ final class Main extends JPanel {
     }
 
     void bindAction(String key, String name, Runnable action) {
+        bindAction(KeyStroke.getKeyStroke(key), name, action);
+    }
+
+    void bindAction(KeyStroke key, String name, Runnable action) {
 
         getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
-                KeyStroke.getKeyStroke(key), name
+                key, name
         );
 
         getActionMap().put(name, new AbstractAction() {
@@ -1090,21 +1135,76 @@ final class Main extends JPanel {
         });
     }
 
-    void bind(String key, int dx, int dy, boolean running) {
-
-        getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
-                KeyStroke.getKeyStroke(key), key
-        );
-
-        getActionMap().put(key, new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                movePlayer(dx, dy, running);
-            }
+    void bindMovementKey(int keyCode, int dx, int dy) {
+        for (int modifiers : new int[] {0, InputEvent.SHIFT_DOWN_MASK}) {
+            boolean running = modifiers != 0;
+            bindAction(KeyStroke.getKeyStroke(keyCode, modifiers, false),
+                    "move-pressed-" + keyCode + "-" + modifiers, () -> {
+                if (gameOver || won || hidden) {
+                    clearMovementInput();
+                    return;
+                }
+                runningHeld = running;
+                // Keyboard repeat must not change which direction was pressed last.
+                if (!heldMovementKeys.containsKey(keyCode)) {
+                    heldMovementKeys.put(keyCode, new Point(dx, dy));
+                    updatePlayerMovement();
+                }
+            });
+        }
+        bindModifierVariants(keyCode, true, "move-released-" + keyCode, () -> {
+            heldMovementKeys.remove(keyCode);
+            updatePlayerMovement();
         });
     }
 
+    void bindModifierVariants(int keyCode, boolean released, String name,
+                              Runnable action) {
+        bindAction(KeyStroke.getKeyStroke(keyCode, 0, released), name, action);
+        // A modifier may change before a held key is released.
+        int[] masks = {InputEvent.SHIFT_DOWN_MASK, InputEvent.CTRL_DOWN_MASK,
+                InputEvent.ALT_DOWN_MASK, InputEvent.META_DOWN_MASK,
+                InputEvent.ALT_GRAPH_DOWN_MASK};
+        for (int combination = 1; combination < (1 << masks.length); combination++) {
+            int modifiers = 0;
+            for (int bit = 0; bit < masks.length; bit++) {
+                if ((combination & (1 << bit)) != 0) {
+                    modifiers |= masks[bit];
+                }
+            }
+            getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
+                    KeyStroke.getKeyStroke(keyCode, modifiers, released), name);
+        }
+    }
+
+    void clearMovementInput() {
+        heldMovementKeys.clear();
+        runningHeld = false;
+    }
+
+    void updatePlayerMovement() {
+        updatePlayerMovement(movementClock.getAsLong());
+    }
+
+    void updatePlayerMovement(long nowNanos) {
+        if (gameOver || won || hidden) {
+            clearMovementInput();
+            return;
+        }
+        Point direction = null;
+        for (Point heldDirection : heldMovementKeys.values()) {
+            direction = heldDirection;
+        }
+        if (direction != null) {
+            movePlayer(direction.x, direction.y, runningHeld, nowNanos);
+        }
+    }
+
     void movePlayer(int dx, int dy, boolean running) {
+        movePlayer(dx, dy, running, movementClock.getAsLong());
+    }
+
+    void movePlayer(int dx, int dy, boolean running, long nowNanos) {
 
         if (gameOver || won) {
             return;
@@ -1117,14 +1217,12 @@ final class Main extends JPanel {
         }
 
         // Movement cooldown: running is faster but louder
-        long now = System.currentTimeMillis();
         long cooldown = running ? RUN_COOLDOWN : WALK_COOLDOWN;
 
-        if (now - lastPlayerMove < cooldown) {
+        if (playerHasStepped &&
+                nowNanos - lastPlayerStepNanos < cooldown * 1_000_000L) {
             return;
         }
-
-        lastPlayerMove = now;
 
         faceX = dx;
         faceY = dy;
@@ -1140,6 +1238,9 @@ final class Main extends JPanel {
 
         playerX = nx;
         playerY = ny;
+        lastPlayerStepNanos = nowNanos;
+        playerHasStepped = true;
+        lastPlayerMove = System.currentTimeMillis();
 
         // Every step makes a sound; the player is never told if it was heard
         emitSound(running ? SoundType.RUN : SoundType.WALK,
@@ -1172,6 +1273,9 @@ final class Main extends JPanel {
         }
 
         checkCollision();
+        if (gameOver || won) {
+            clearMovementInput();
+        }
         repaint();
     }
 
@@ -1319,6 +1423,7 @@ final class Main extends JPanel {
         }
 
         hidden = true;
+        clearMovementInput();
         emitSound(SoundType.LOCKER, playerX, playerY);
         message = "You hide in the locker. Stay quiet...";
         repaint();
@@ -2258,6 +2363,8 @@ final class Main extends JPanel {
 
     void restartGame() {
 
+        clearMovementInput();
+
         buildMap(); // new hallway lengths, rooms and connections
 
         playerX = roomTile(0, 1, 1)[0];
@@ -2311,6 +2418,8 @@ final class Main extends JPanel {
         lastAwareUpdate = now;
         lastMonsterMove = now;
         lastPlayerMove = 0;
+        lastPlayerStepNanos = 0;
+        playerHasStepped = false;
 
         message = "Find the keycard and escape!";
 
