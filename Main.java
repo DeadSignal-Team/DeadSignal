@@ -2725,65 +2725,85 @@ final class Main extends JPanel {
     // -------------------------------------------------
 
     static class MainMenuPanel extends JPanel {
+        private static final int DESIGN_WIDTH = 840;
+        private static final int DESIGN_HEIGHT = 688;
+        private static final int TEXT_WIDTH = 600;
+        private static final int BUTTON_WIDTH = 250;
+        private static final int BUTTON_HEIGHT = 45;
+        private static final int BUTTON_GAP = 10;
+        private static final double MIN_UI_SCALE = 0.80;
+        private static final double MAX_UI_SCALE = 1.60;
+        private static final int[] MOUNTAIN_X =
+                {0, 90, 180, 270, 360, 450, 540, 630, 720, 840};
+        private static final int[] MOUNTAIN_Y =
+                {390, 270, 350, 240, 370, 280, 360, 250, 340, 270};
+
         private final Color red = new Color(170, 25, 38);
-        private final Random random = new Random();
         private final JFrame frame;
+        private final JPanel menuColumn = new JPanel();
+        private final GridLayout buttonLayout = new GridLayout(5, 1);
+        private final JPanel buttons = new JPanel(buttonLayout);
+        private final JLabel title;
+        private final JLabel subtitle;
+        private final JLabel status;
+        private final JLabel developer;
+        private final int[] fogX = new int[35];
+        private final int[] fogY = new int[35];
+        private double appliedScale = -1;
+        private int appliedTextWidth = -1;
 
         MainMenuPanel(JFrame frame) {
             this.frame = frame;
-            setPreferredSize(new Dimension(COLS * TILE, ROWS * TILE + PANEL_H));
-            setLayout(null);
+            setPreferredSize(new Dimension(DESIGN_WIDTH, DESIGN_HEIGHT));
+            setLayout(new BorderLayout());
             setBackground(Color.BLACK);
 
-            JLabel title = new JLabel("DEAD SIGNAL");
-            title.setBounds(120, 95, 600, 75);
-            title.setForeground(new Color(190, 35, 45));
-            title.setFont(new Font("Monospaced", Font.BOLD, 43));
-            title.setHorizontalAlignment(SwingConstants.CENTER);
-            add(title);
+            menuColumn.setOpaque(false);
+            menuColumn.setLayout(new BoxLayout(menuColumn, BoxLayout.Y_AXIS));
+            buttons.setOpaque(false);
+            buttons.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-            JLabel subtitle = new JLabel("THE LAST NIGHT");
-            subtitle.setBounds(120, 165, 600, 30);
-            subtitle.setForeground(new Color(160, 160, 160));
-            subtitle.setFont(new Font("Monospaced", Font.PLAIN, 17));
-            subtitle.setHorizontalAlignment(SwingConstants.CENTER);
-            add(subtitle);
+            title = createLabel("DEAD SIGNAL", new Color(190, 35, 45));
+            subtitle = createLabel("THE LAST NIGHT", new Color(160, 160, 160));
+            status = createLabel("YOUR NIGHTMARE IS WAITING...", new Color(115, 115, 125));
+            menuColumn.add(title);
+            menuColumn.add(subtitle);
+            menuColumn.add(status);
+            menuColumn.add(buttons);
 
-            JLabel status = new JLabel("YOUR NIGHTMARE IS WAITING...");
-            status.setBounds(120, 205, 600, 25);
-            status.setForeground(new Color(115, 115, 125));
-            status.setFont(new Font("Monospaced", Font.PLAIN, 11));
-            status.setHorizontalAlignment(SwingConstants.CENTER);
-            add(status);
+            // Center the whole column using the current window's content area.
+            JPanel center = new JPanel(new GridBagLayout());
+            center.setOpaque(false);
+            center.add(menuColumn);
+            add(center, BorderLayout.CENTER);
+
+            developer = createLabel("A GROUP 2 PRODUCTION | VERSION 1.0",
+                    new Color(95, 95, 105));
+            add(developer, BorderLayout.SOUTH);
 
             JButton newGame = createButton("NEW GAME");
-            newGame.setBounds(295, 270, 250, 45);
-            add(newGame);
+            buttons.add(newGame);
             newGame.addActionListener(e -> startGame());
 
             JButton continueGame = createButton("CONTINUE");
-            continueGame.setBounds(295, 325, 250, 45);
-            add(continueGame);
+            buttons.add(continueGame);
             continueGame.addActionListener(e -> JOptionPane.showMessageDialog(
                     frame, "No saved game found.", "CONTINUE", JOptionPane.WARNING_MESSAGE));
 
             JButton settings = createButton("SETTINGS");
-            settings.setBounds(295, 380, 250, 45);
-            add(settings);
+            buttons.add(settings);
             settings.addActionListener(e -> JOptionPane.showMessageDialog(
                     frame, "GAME SETTINGS\n\nSound: ON\nDifficulty: NORMAL\nDisplay: WINDOWED",
                     "SETTINGS", JOptionPane.PLAIN_MESSAGE));
 
             JButton credits = createButton("CREDITS");
-            credits.setBounds(295, 435, 250, 45);
-            add(credits);
+            buttons.add(credits);
             credits.addActionListener(e -> JOptionPane.showMessageDialog(
                     frame, "DEAD SIGNAL\n\nDeveloped by Group 2\n\nThank you for playing.",
                     "CREDITS", JOptionPane.INFORMATION_MESSAGE));
 
             JButton exit = createButton("EXIT GAME");
-            exit.setBounds(295, 490, 250, 45);
-            add(exit);
+            buttons.add(exit);
             exit.addActionListener(e -> {
                 int answer = JOptionPane.showConfirmDialog(frame,
                         "Are you sure you want to leave the nightmare?", "EXIT GAME",
@@ -2791,12 +2811,84 @@ final class Main extends JPanel {
                 if (answer == JOptionPane.YES_OPTION) System.exit(0);
             });
 
-            JLabel developer = new JLabel("A GROUP 2 PRODUCTION | VERSION 1.0");
-            developer.setBounds(120, 635, 600, 20);
-            developer.setForeground(new Color(95, 95, 105));
-            developer.setFont(new Font("Monospaced", Font.PLAIN, 10));
-            developer.setHorizontalAlignment(SwingConstants.CENTER);
-            add(developer);
+            // Keep the existing atmosphere stable when buttons repaint on hover.
+            Random random = new Random();
+            for (int i = 0; i < fogX.length; i++) {
+                fogX[i] = random.nextInt(DESIGN_WIDTH);
+                fogY[i] = 420 + random.nextInt(250);
+            }
+            updateResponsiveSizes(DESIGN_WIDTH, DESIGN_HEIGHT);
+        }
+
+        private JLabel createLabel(String text, Color color) {
+            JLabel label = new JLabel(text, SwingConstants.CENTER);
+            label.setForeground(color);
+            label.setAlignmentX(Component.CENTER_ALIGNMENT);
+            return label;
+        }
+
+        private static int scaled(int value, double scale) {
+            return Math.max(1, (int) Math.round(value * scale));
+        }
+
+        private void sizeLabel(JLabel label, int fontSize, int fontStyle,
+                               int width, int topGap, int bottomGap, double scale) {
+            label.setFont(new Font("Monospaced", fontStyle, scaled(fontSize, scale)));
+            int top = (int) Math.round(topGap * scale);
+            int bottom = (int) Math.round(bottomGap * scale);
+            label.setBorder(BorderFactory.createEmptyBorder(top, 0, bottom, 0));
+            int height = label.getFontMetrics(label.getFont()).getHeight() + top + bottom;
+            Dimension size = new Dimension(width, height);
+            label.setPreferredSize(size);
+            label.setMinimumSize(size);
+            label.setMaximumSize(size);
+        }
+
+        private void updateResponsiveSizes(int width, int height) {
+            double scale = Math.max(MIN_UI_SCALE, Math.min(MAX_UI_SCALE,
+                    Math.min((double) width / DESIGN_WIDTH,
+                            (double) height / DESIGN_HEIGHT)));
+            int padding = scaled(24, scale);
+            int textWidth = Math.max(1,
+                    Math.min(scaled(TEXT_WIDTH, scale), width - padding * 2));
+            if (scale == appliedScale && textWidth == appliedTextWidth) {
+                return;
+            }
+            appliedScale = scale;
+            appliedTextWidth = textWidth;
+
+            setBorder(BorderFactory.createEmptyBorder(
+                    scaled(16, scale), padding, scaled(20, scale), padding));
+            sizeLabel(title, 43, Font.BOLD, textWidth, 0, 0, scale);
+            sizeLabel(subtitle, 17, Font.PLAIN, textWidth, 8, 0, scale);
+            sizeLabel(status, 11, Font.PLAIN, textWidth, 18, 44, scale);
+
+            int buttonWidth = Math.min(textWidth, scaled(BUTTON_WIDTH, scale));
+            int buttonHeight = scaled(BUTTON_HEIGHT, scale);
+            int gap = scaled(BUTTON_GAP, scale);
+            buttonLayout.setVgap(gap);
+            for (Component button : buttons.getComponents()) {
+                button.setFont(new Font("Monospaced", Font.BOLD, scaled(15, scale)));
+            }
+            Dimension buttonSize = new Dimension(buttonWidth,
+                    buttons.getComponentCount() * buttonHeight
+                            + (buttons.getComponentCount() - 1) * gap);
+            buttons.setPreferredSize(buttonSize);
+            buttons.setMinimumSize(buttonSize);
+            buttons.setMaximumSize(buttonSize);
+
+            developer.setFont(new Font("Monospaced", Font.PLAIN, scaled(10, scale)));
+            developer.setBorder(BorderFactory.createEmptyBorder(scaled(24, scale), 0, 0, 0));
+
+            // Refresh cached child sizes before the centering layout runs.
+            buttons.invalidate();
+            menuColumn.invalidate();
+        }
+
+        @Override
+        public void doLayout() {
+            updateResponsiveSizes(getWidth(), getHeight());
+            super.doLayout();
         }
 
         private void startGame() {
@@ -2831,28 +2923,47 @@ final class Main extends JPanel {
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
+            int width = getWidth();
+            int height = getHeight();
+            if (width <= 0 || height <= 0) {
+                return;
+            }
             Graphics2D g2 = (Graphics2D) g.create();
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g2.setPaint(new GradientPaint(0, 0, new Color(5, 7, 13),
-                    0, getHeight(), new Color(24, 13, 18)));
-            g2.fillRect(0, 0, getWidth(), getHeight());
+                    0, height, new Color(24, 13, 18)));
+            g2.fillRect(0, 0, width, height);
+
+            double scaleX = (double) width / DESIGN_WIDTH;
+            double scaleY = (double) height / DESIGN_HEIGHT;
+            // Scale the moon uniformly, even on a very wide display.
+            int moonSize = scaled(90, Math.min(scaleX, scaleY));
             g2.setColor(new Color(180, 180, 190, 35));
-            g2.fillOval(640, 65, 90, 90);
+            g2.fillOval((int) Math.round(640 * scaleX),
+                    (int) Math.round(65 * scaleY), moonSize, moonSize);
+
             g2.setColor(new Color(15, 17, 23));
-            int[] x = {0, 90, 180, 270, 360, 450, 540, 630, 720, 840};
-            int[] y = {390, 270, 350, 240, 370, 280, 360, 250, 340, 270};
+            int[] x = new int[MOUNTAIN_X.length];
+            int[] y = new int[MOUNTAIN_Y.length];
+            for (int i = 0; i < x.length; i++) {
+                x[i] = (int) Math.round(MOUNTAIN_X[i] * scaleX);
+                y[i] = (int) Math.round(MOUNTAIN_Y[i] * scaleY);
+            }
             g2.fillPolygon(x, y, x.length);
+
+            int groundY = (int) Math.round(430 * scaleY);
             g2.setColor(new Color(12, 12, 17));
-            g2.fillRect(0, 430, 840, 258);
+            g2.fillRect(0, groundY, width, height - groundY);
             g2.setColor(new Color(80, 20, 27, 80));
-            for (int i = 0; i < 35; i++) {
-                int fx = random.nextInt(840);
-                int fy = 420 + random.nextInt(250);
-                g2.fillOval(fx, fy, 80, 3);
+            for (int i = 0; i < fogX.length; i++) {
+                g2.fillOval((int) Math.round(fogX[i] * scaleX),
+                        (int) Math.round(fogY[i] * scaleY),
+                        scaled(80, scaleX), scaled(3, scaleY));
             }
             g2.setColor(new Color(120, 20, 30, 35));
-            g2.fillRect(0, 0, 840, 3);
-            g2.fillRect(0, 685, 840, 3);
+            int edgeHeight = scaled(3, scaleY);
+            g2.fillRect(0, 0, width, edgeHeight);
+            g2.fillRect(0, height - edgeHeight, width, edgeHeight);
             g2.dispose();
         }
     }
