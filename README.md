@@ -32,9 +32,29 @@ Choose **NEW GAME** from the menu to start. Compiled files stay in the ignored `
 | Q | Throw the held object |
 | F | Hide in or leave a locker |
 | R | Restart |
+| P | Warning volume and reduced-effects settings (pauses gameplay) |
 | M, while debug mode is enabled | Reveal the map |
 
 The imported source has `DEBUG = true`. In this mode, shifts happen every 30 seconds and the random generator uses a fixed seed. Normal mode uses a 2–3 minute shift interval. The initial import preserves these settings.
+
+## Warning cues
+
+Warning audio is generated in Java: an industrial drone, radio hiss, heartbeat, and escalation sting. No audio downloads or extra libraries are required.
+
+- A quiet, nondirectional proximity layer plays when the monster is nearby, even if it has not detected you. Walls and hiding muffle this layer.
+- The existing awareness meter controls the tension layers, heartbeat intensity, and red playfield-edge cues. The center and HUD remain clear. Warning feedback does not create noise events that attract the monster.
+- Open **SETTINGS** from the main menu or press **P** during play. Set warning volume to **0** to mute audio. **Reduced visual effects** makes the edge cue gentler and disables its pulse and the awareness bar's pulse. Settings are kept for the current session.
+- Gameplay pauses while the in-game settings dialog is open. Audio fades out when the game loses focus and after victory or defeat. Restart clears the previous warning state.
+- If the system audio device cannot be opened, the game continues with visual cues.
+
+To run the cue regression checks without opening an audio device or game window:
+
+```shell
+javac --release 17 -d build/checks Main.java tests/WarningCuesCheck.java
+java -Djava.awt.headless=true -cp build/checks com.mycompany.deadsignal.WarningCuesCheck build/cue-checks
+```
+
+The checks cover proximity while undetected, wall/locker attenuation, awareness escalation, sting cooldown, mute and restart cleanup, settings pause, and clear playfield/HUD rendering. They also save preview images and an audio sample under the ignored `build/cue-checks/` directory.
 
 ## Sprite images
 
