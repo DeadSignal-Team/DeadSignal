@@ -1,0 +1,16 @@
+# Java compiler and build output
+*.class
+/build/
+/out/
+/target/
+
+# JVM crash and profiling output
+hs_err_pid*.log
+replay_pid*.log
+*.hprof
+*.jfr
+
+# Machine-generated files
+.DS_Store
+Thumbs.db
+desktop.ini
