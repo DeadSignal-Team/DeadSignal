@@ -3047,14 +3047,18 @@ final class Main extends JPanel {
             if (frame != null) show(new MainMenuPanel(frame, this));
         }
 
-        void startNewGame() {
+        void startNewGame(Font menuFont) {
             if (canContinue() && frame != null && JOptionPane.showConfirmDialog(frame,
                     "Replace your current run with a new game?", "NEW GAME",
                     JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
             if (run != null) run.suspendForMenu();
-            run = new Main();
-            run.ownerSession = this;
-            if (frame != null) show(run);
+            Runnable beginRun = () -> {
+                run = new Main();
+                run.ownerSession = this;
+                if (frame != null) show(run);
+            };
+            if (frame == null) beginRun.run();
+            else IntroVideoPanel.showBeforeGame(frame, menuFont, beginRun);
         }
 
         void continueGame() {
@@ -3861,7 +3865,10 @@ final class Main extends JPanel {
         }
 
         private void startGame() {
-            session.startNewGame();
+            if (frame != null && frame.getContentPane() != this) {
+                return;
+            }
+            session.startNewGame(buttons.getComponent(0).getFont());
         }
 
         private JButton createButton(String text) {

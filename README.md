@@ -6,21 +6,39 @@ This repository starts with an unchanged snapshot of the saved `Main.java`. It c
 
 ## Requirements
 
-- JDK 17 or newer, with `java` and `javac` available in your terminal.
+- JDK 17 or newer, available through `JAVA_HOME`, your terminal, or the launcher's `-JavaHome` option.
 - A desktop environment for the Java Swing game window.
+- The included PowerShell launcher supports Windows x64 and downloads JavaFX 17.0.21 from Maven Central on its first run. It verifies the pinned SHA-256 hashes and caches the libraries in the ignored `.deps/` folder. Later builds and launches work offline.
 
 VS Code with the Extension Pack for Java is optional.
+
+For VS Code **Run and Debug**, open this worktree's folder and select **Dead Signal (intro worktree)**. The included profile builds the bundled video and launches with the JavaFX modules. A different worktree will run that worktree's game; it will not pick up this branch's uncommitted intro changes. The launcher can also detect the JDK bundled with the VS Code Java extension when neither `JAVA_HOME` nor `javac` is configured.
 
 ## Build and run
 
 Open a terminal in the repository root and run:
 
-```shell
-javac --release 17 -d build/classes Main.java
-java -cp build/classes com.mycompany.deadsignal.Main
+```powershell
+.\game.ps1
 ```
 
-Choose **NEW GAME** from the menu to start. Compiled files stay in the ignored `build/` directory.
+If your JDK is not on the terminal path, supply its installation folder:
+
+```powershell
+.\game.ps1 -JavaHome 'C:\path\to\jdk'
+```
+
+Use `-Action Build` to compile without launching. Compiled files and the bundled assets stay in the ignored `build/` directory. The launcher uses its own project directory, so it can also be invoked from another folder. JavaFX's `javafx.swing` and `javafx.media` modules are now required; the old plain `javac Main.java` command is insufficient.
+
+## New Game intro
+
+Choose **NEW GAME** to play `assets/video/intro.mp4` in the same window. **SKIP** is available immediately at the bottom right and uses the main menu button's font, weight, and responsive text size. The video keeps its original aspect ratio, with black bars where needed.
+
+Gameplay starts after the video finishes or is skipped, so monster updates and warning audio do not run underneath the intro. Every new game from the menu gets the intro; **R** and direct gameplay restarts never replay it. Missing media, playback errors, or a video that cannot start within 15 seconds fall through to gameplay. Video/audio resources are released before the transition.
+
+When replacing a current run, the existing New Game confirmation appears first. Canceling keeps that run, and **CONTINUE** resumes it directly without replaying the intro.
+
+The supplied video is bundled with the build and does not depend on a personal Videos folder. JavaFX supports MP4/H.264 video with AAC audio; replacing the clip requires a compatible encoding.
 
 ## Controls
 
@@ -78,9 +96,8 @@ Warning audio is generated in Java: an industrial drone, radio hiss, heartbeat, 
 
 To run the cue regression checks without opening an audio device or game window:
 
-```shell
-javac --release 17 -d build/checks Main.java tests/WarningCuesCheck.java
-java -Djava.awt.headless=true -cp build/checks com.mycompany.deadsignal.WarningCuesCheck build/cue-checks
+```powershell
+.\game.ps1 -Action Test
 ```
 
 The checks cover proximity while undetected, wall/locker attenuation, awareness escalation, sting cooldown, mute and restart cleanup, settings pause, and clear playfield/HUD rendering. They also save preview images and an audio sample under the ignored `build/cue-checks/` directory.
@@ -91,10 +108,19 @@ These checks exercise the Swing key bindings and movement timing without opening
 game window. They cover held input, turning, running, walls, focus loss, lockers,
 restart, and panel cleanup.
 
-```shell
-javac --release 17 -d build/test-classes Main.java tests/MovementInputTest.java
-java "-Djava.awt.headless=true" -cp build/test-classes com.mycompany.deadsignal.MovementInputTest
+```powershell
+.\game.ps1 -Action Test
 ```
+
+This also runs the intro flow checks: Skip, natural end, loading failures, duplicate callbacks, cleanup, R/restart behavior, and matching the menu font and bottom-right position across window sizes.
+
+For a muted native playback check of the bundled MP4 (no video window is shown):
+
+```powershell
+.\game.ps1 -Action MediaTest
+```
+
+The native checks require a desktop session and verify decoding, playback completion, release, and replay. They also exercise the real New Game button, embedded video, Skip, R, replacement confirmation, and Continue in an off-screen game window. Add `-JavaHome` to either test command if needed.
 
 ## Sprite images
 

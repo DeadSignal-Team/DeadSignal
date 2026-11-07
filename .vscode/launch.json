@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Dead Signal (intro worktree)",
+            "request": "launch",
+            "mainClass": "com.mycompany.deadsignal.Main",
+            "cwd": "${workspaceFolder}",
+            "classPaths": ["${workspaceFolder}/build/classes"],
+            "modulePaths": ["${workspaceFolder}/.deps/javafx-17.0.21-win"],
+            "vmArgs": "--add-modules=javafx.swing,javafx.media --enable-native-access=javafx.graphics,javafx.media",
+            "preLaunchTask": "Build Dead Signal with intro",
+            "console": "integratedTerminal"
+        }
+    ]
+}
