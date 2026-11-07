@@ -200,7 +200,7 @@ final class Main extends JPanel {
     // -------------------------------------------------
 
     // DEBUG = true : shows the monster, its state, debug info and the shift timer.
-    // Press M in DEBUG mode to remove every ceiling (for testing room shifting).
+    // M opens the remembered map; it never reveals the monster.
     // Set to false for the real horror experience.
     static final boolean DEBUG = true;
     static final long SEED = 12345; // used for the random generator in DEBUG
@@ -242,7 +242,6 @@ final class Main extends JPanel {
     static final double INITIAL_CLOSE_CHANCE = 0.35; // when the game starts
     static final double CLOSE_CHANCE = 0.30;         // open hallway gets sealed
     static final double OPEN_CHANCE = 0.60;          // sealed hallway reopens
-    static final double ITEM_SHUFFLE_CHANCE = 0.60;  // items in empty rooms move
 
     // Noise levels (distance the sound travels)
     static final int WALK_NOISE = 3;
@@ -360,6 +359,11 @@ final class Main extends JPanel {
     static final int CUE_STING_COOLDOWN_MS = 6000;
     static final int CUE_MAX_EDGE_ALPHA = 64;
     static final int CUE_SAMPLE_RATE = 22050;
+    static final long DOOR_STUN_MS = 2000;
+    static final long DOOR_STUN_COOLDOWN_MS = 8000;
+    static final long DOOR_FORCE_MS = 2500;
+    static final long MAP_DURATION_MS = 10000;
+    static final long MAP_COOLDOWN_MS = 25000;
     static final WarningSettings WARNING_SETTINGS = new WarningSettings();
 
     // Noise meter colors (monochrome; only "very loud" gets a faint red tint)
@@ -379,6 +383,7 @@ final class Main extends JPanel {
         RUN(RUN_NOISE, "Running"),
         LOCKER(LOCKER_NOISE, "Locker"),
         PICKUP(PICKUP_NOISE, "Object"),
+        DOOR(6, "Door"),
         IMPACT(BOTTLE_NOISE, "Impact"); // thrown items use their own loudness
 
         final int loudness;
@@ -472,8 +477,8 @@ final class Main extends JPanel {
     // One connection = one hallway between two neighboring rooms.
     // It is either open (a walkable corridor) or sealed (solid wall).
     static final class Connection {
-        final int a;               // room id on the left / top
-        final int b;               // room id on the right / bottom
+        final int a;               // physical slot on the left / top
+        final int b;               // physical slot on the right / bottom
         final boolean horizontal;  // true = runs left-right
         final int length;          // hallway length in tiles
         boolean open = true;
@@ -500,13 +505,33 @@ final class Main extends JPanel {
     char[][] map = new char[ROWS][COLS];
 
     // Which section each tile belongs to (-1 = outer wall / junction).
-    // Set once per game and never changes: a hallway's whole gap (the
+    // Rebuilt after room exchanges: a hallway's whole gap (the
     // corridor AND the solid tiles beside it) is one section.
     int[][] section = new int[ROWS][COLS];
 
     // Ceiling state per section: true = roof is on, interior is hidden
     boolean[] ceilingOn = new boolean[ROOM_COUNT + CONN_COUNT];
-    boolean revealAll = false; // DEBUG only (press M): removes all ceilings
+    final int[] roomAtSlot = new int[ROOM_COUNT];
+    final int[] slotOfRoom = new int[ROOM_COUNT];
+    final Door[][] roomDoors = new Door[ROOM_COUNT][4];
+    final MapJournal journal = new MapJournal();
+    ViewMode viewMode = ViewMode.PLAYING;
+    boolean shiftPending;
+    long mapOpenedAt = -MAP_COOLDOWN_MS;
+    long mapClosesAt;
+    long monsterStunnedUntil;
+    long lastDoorStunAt = -DOOR_STUN_COOLDOWN_MS;
+    Door forcingDoor;
+    long doorForceStartedAt = -1;
+    boolean mapKeyHeld, escapeKeyHeld;
+    final HashSet<Integer> suppressedMovementKeys = new HashSet<>();
+    final HashSet<Integer> heldActionKeys = new HashSet<>();
+    final LongSupplier wallClock;
+    boolean clockPaused;
+    long pausedWallAt, pausedMovementAt, pausedMillis, pausedNanos;
+    JPanel pausePanel;
+    JButton resumeButton;
+    GameSession ownerSession;
 
     int[] roomX0 = new int[ROOM_COLS];
     int[] roomY0 = new int[ROOM_ROWS];
@@ -573,7 +598,7 @@ final class Main extends JPanel {
     final WindowAdapter movementFocusListener = new WindowAdapter() {
         @Override
         public void windowLostFocus(WindowEvent e) {
-            clearMovementInput();
+            clearAllControls();
         }
     };
 
@@ -609,25 +634,24 @@ final class Main extends JPanel {
     }
 
     Main(LongSupplier movementClock) {
-        this.movementClock = movementClock;
-        setPreferredSize(new Dimension(
-                COLS * TILE, ROWS * TILE + PANEL_H
-        ));
+        this(movementClock, System::currentTimeMillis);
+    }
 
+    Main(LongSupplier movementClock, LongSupplier wallClock) {
+        this.movementClock = movementClock;
+        this.wallClock = wallClock;
+        setPreferredSize(new Dimension(COLS * TILE, ROWS * TILE + PANEL_H));
         setBackground(Color.BLACK);
         setFocusable(true);
-
         setupControls();
-
-        restartGame(); // builds the first game
-
-        // Timers and audio start only when the game panel is attached.
+        initPausePanel();
+        restartGame();
     }
 
     @Override
     public void addNotify() {
         super.addNotify();
-        clearMovementInput();
+        clearAllControls();
         movementWindow = SwingUtilities.getWindowAncestor(this);
         if (movementWindow != null) {
             movementWindow.addWindowFocusListener(movementFocusListener);
@@ -661,12 +685,13 @@ final class Main extends JPanel {
     void updateWarningCues(long now) {
         Window window = SwingUtilities.getWindowAncestor(this);
         boolean active = !gameOver && !won && !warningSettingsOpen
+                && (viewMode == ViewMode.PLAYING || viewMode == ViewMode.MAP)
                 && isShowing() && window != null && window.isFocused();
         warningCues.update(awareness, nearbyMonsterLevel(), active, now);
     }
 
     void openWarningSettings() {
-        if (warningSettingsOpen) return;
+        if (warningSettingsOpen || viewMode != ViewMode.PLAYING) return;
         WarningPause pause = pauseWarningSettings();
         try {
             showWarningSettings(this);
@@ -679,37 +704,21 @@ final class Main extends JPanel {
                         boolean gameTimerRunning, boolean movementTimerRunning) { }
 
     WarningPause pauseWarningSettings() {
-        WarningPause pause = new WarningPause(System.currentTimeMillis(),
-                movementClock.getAsLong(), gameTimer.isRunning(), movementTimer.isRunning());
+        WarningPause pause = new WarningPause(gameNow(), movementNow(),
+                gameTimer.isRunning(), movementTimer.isRunning());
         warningSettingsOpen = true;
+        pauseSimulation();
         movementTimer.stop();
         gameTimer.stop();
-        clearMovementInput();
-        warningCues.update(awareness, nearbyMonsterLevel(), false, pause.openedAt());
+        clearAllControls();
         return pause;
     }
 
     void resumeWarningSettings(WarningPause pause) {
-        long now = System.currentTimeMillis();
-        long paused = Math.max(0, now - pause.openedAt());
-        nextShiftAt += paused;
-        lastNoiseUpdate += paused;
-        lastAwareUpdate += paused;
-        lastMonsterMove += paused;
-        lastPlayerMove += paused;
-        lastNoiseTextTime += paused;
-        if (playerHasStepped) {
-            lastPlayerStepNanos += Math.max(0, movementClock.getAsLong() - pause.movementAt());
-        }
-        Queue<SoundEvent> pausedSounds = new LinkedList<>();
-        for (SoundEvent sound : soundQueue) {
-            pausedSounds.add(new SoundEvent(sound.type, sound.x, sound.y,
-                    sound.loudness, sound.byPlayer, sound.time + paused));
-        }
-        soundQueue = pausedSounds;
-        clearMovementInput();
         warningSettingsOpen = false;
-        updateWarningCues(now);
+        resumeSimulation();
+        clearAllControls();
+        updateWarningCues(gameNow());
         if (isDisplayable()) {
             if (pause.movementTimerRunning()) movementTimer.start();
             if (pause.gameTimerRunning()) gameTimer.start();
@@ -723,13 +732,13 @@ final class Main extends JPanel {
 
     // Returns the {x, y} tile at (dx, dy) inside a room
     int[] roomTile(int room, int dx, int dy) {
-        int col = room % ROOM_COLS;
-        int row = room / ROOM_COLS;
-        return new int[] {roomX0[col] + dx, roomY0[row] + dy};
+        int slot = slotOfRoom[room];
+        return new int[] {roomX0[slot % ROOM_COLS] + dx, roomY0[slot / ROOM_COLS] + dy};
     }
 
     // Picks hallway lengths, places rooms and builds the first layout
     void buildMap() {
+        initRoomIdentities();
 
         // 1. Choose how long the hallways between room columns/rows are
         colGap = COL_GAP_OPTIONS[random.nextInt(COL_GAP_OPTIONS.length)];
@@ -804,10 +813,11 @@ final class Main extends JPanel {
         }
 
         applyLayout();
+        rebuildDoors();
     }
 
     // Rebuilds the whole map from the room grid + the open connections.
-    // Rooms never change, so rebuilding never alters a room's own tiles.
+    // Room footprints stay fixed; room identities and contents exchange slots.
     void applyLayout() {
 
         // Everything starts as solid wall
@@ -836,7 +846,7 @@ final class Main extends JPanel {
         }
     }
 
-    // Marks which section every tile belongs to. This never changes, so a
+    // Marks the current room identity or hallway for each tile, so a
     // covered hallway looks the same whether it is open or sealed.
     void initSections() {
 
@@ -913,12 +923,8 @@ final class Main extends JPanel {
     }
 
     boolean isWall(int x, int y) {
-        if (x < 0 || y < 0 ||
-                x >= COLS || y >= ROWS) {
-            return true;
-        }
-
-        return map[y][x] == '#';
+        Door door = doorAt(x, y);
+        return terrainWall(x, y) || (door != null && !door.open);
     }
 
     int sectionAt(int x, int y) {
@@ -1115,7 +1121,7 @@ final class Main extends JPanel {
 
         Connection c = conns[s - HALL_BASE];
 
-        if (!c.open || map[y][x] != 'h' || (c.a != cur && c.b != cur)) {
+        if (!c.open || map[y][x] != 'h' || (roomAtSlot[c.a] != cur && roomAtSlot[c.b] != cur)) {
             return false;
         }
 
@@ -1126,11 +1132,11 @@ final class Main extends JPanel {
         int dist;
 
         if (c.horizontal) {
-            dist = (c.a == cur)
+            dist = (roomAtSlot[c.a] == cur)
                     ? x - (roomX0[colA] + ROOM_W)
                     : (roomX0[colA + 1] - 1) - x;
         } else {
-            dist = (c.a == cur)
+            dist = (roomAtSlot[c.a] == cur)
                     ? y - (roomY0[rowA] + ROOM_H)
                     : (roomY0[rowA + 1] - 1) - y;
         }
@@ -1144,7 +1150,6 @@ final class Main extends JPanel {
         int s = sectionAt(x, y);
 
         return s >= 0 && ceilingOn[s] &&
-                !(DEBUG && revealAll) &&
                 !isThreshold(x, y);
     }
 
@@ -1186,17 +1191,24 @@ final class Main extends JPanel {
             updatePlayerMovement();
         });
 
-        bindAction("E", "grab", this::grabItem);
-        bindAction("Q", "throw", this::throwItem);
-        bindAction("F", "locker", this::toggleLocker);
-        bindAction("R", "restart", this::restartGame);
-        bindAction("P", "warning-settings", this::openWarningSettings);
-        bindAction("M", "reveal", () -> {
-            if (DEBUG) {
-                revealAll = !revealAll;
-                repaint();
-            }
+        bindGameplayAction(KeyEvent.VK_E, "grab", this::grabItem, false);
+        bindGameplayAction(KeyEvent.VK_Q, "throw", this::throwItem, false);
+        bindGameplayAction(KeyEvent.VK_F, "locker", this::toggleLocker, false);
+        bindGameplayAction(KeyEvent.VK_R, "restart", this::restartGame, true);
+        bindGameplayAction(KeyEvent.VK_P, "warning-settings", this::openWarningSettings, false);
+        bindGameplayAction(KeyEvent.VK_SPACE, "door", this::toggleDoor, false);
+        bindAction("M", "map", () -> {
+            if (!mapKeyHeld) { mapKeyHeld = true; toggleMap(); }
         });
+        getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_M, InputEvent.SHIFT_DOWN_MASK, false), "map");
+        bindModifierVariants(KeyEvent.VK_M, true, "map-released", () -> mapKeyHeld = false);
+        bindAction("ESCAPE", "escape", () -> {
+            if (!escapeKeyHeld) { escapeKeyHeld = true; handleEscape(); }
+        });
+        getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, InputEvent.SHIFT_DOWN_MASK, false), "escape");
+        bindModifierVariants(KeyEvent.VK_ESCAPE, true, "escape-released", () -> escapeKeyHeld = false);
     }
 
     void bindAction(String key, String name, Runnable action) {
@@ -1222,10 +1234,12 @@ final class Main extends JPanel {
             boolean running = modifiers != 0;
             bindAction(KeyStroke.getKeyStroke(keyCode, modifiers, false),
                     "move-pressed-" + keyCode + "-" + modifiers, () -> {
-                if (gameOver || won || hidden || warningSettingsOpen) {
+                if (inputLocked() || hidden) {
+                    suppressedMovementKeys.add(keyCode);
                     clearMovementInput();
                     return;
                 }
+                if (suppressedMovementKeys.contains(keyCode)) return;
                 runningHeld = running;
                 // Keyboard repeat must not change which direction was pressed last.
                 if (!heldMovementKeys.containsKey(keyCode)) {
@@ -1236,6 +1250,7 @@ final class Main extends JPanel {
         }
         bindModifierVariants(keyCode, true, "move-released-" + keyCode, () -> {
             heldMovementKeys.remove(keyCode);
+            suppressedMovementKeys.remove(keyCode);
             updatePlayerMovement();
         });
     }
@@ -1265,11 +1280,11 @@ final class Main extends JPanel {
     }
 
     void updatePlayerMovement() {
-        updatePlayerMovement(movementClock.getAsLong());
+        updatePlayerMovement(movementNow());
     }
 
     void updatePlayerMovement(long nowNanos) {
-        if (gameOver || won || hidden || warningSettingsOpen) {
+        if (inputLocked() || hidden) {
             clearMovementInput();
             return;
         }
@@ -1283,12 +1298,12 @@ final class Main extends JPanel {
     }
 
     void movePlayer(int dx, int dy, boolean running) {
-        movePlayer(dx, dy, running, movementClock.getAsLong());
+        movePlayer(dx, dy, running, movementNow());
     }
 
     void movePlayer(int dx, int dy, boolean running, long nowNanos) {
 
-        if (gameOver || won || warningSettingsOpen) {
+        if (inputLocked()) {
             return;
         }
 
@@ -1322,7 +1337,7 @@ final class Main extends JPanel {
         playerY = ny;
         lastPlayerStepNanos = nowNanos;
         playerHasStepped = true;
-        lastPlayerMove = System.currentTimeMillis();
+        lastPlayerMove = gameNow();
 
         // Every step makes a sound; the player is never told if it was heard
         emitSound(running ? SoundType.RUN : SoundType.WALK,
@@ -1354,6 +1369,7 @@ final class Main extends JPanel {
             }
         }
 
+        observeArea();
         checkCollision();
         if (gameOver || won) {
             clearMovementInput();
@@ -1389,7 +1405,7 @@ final class Main extends JPanel {
     // E key: pick up the closest item
     void grabItem() {
 
-        if (gameOver || won) {
+        if (inputLocked()) {
             return;
         }
 
@@ -1426,7 +1442,7 @@ final class Main extends JPanel {
     // Q key: throw the held item in the direction the player faces
     void throwItem() {
 
-        if (gameOver || won) {
+        if (inputLocked()) {
             return;
         }
 
@@ -1478,7 +1494,7 @@ final class Main extends JPanel {
     // Press F on a locker tile to hide or to leave
     void toggleLocker() {
 
-        if (gameOver || won) {
+        if (inputLocked()) {
             return;
         }
 
@@ -1513,6 +1529,9 @@ final class Main extends JPanel {
 
     // Text shown on the HUD, e.g. "[E] GRAB BOTTLE" (empty if nothing to do)
     String interactionPrompt() {
+        if (viewMode != ViewMode.PLAYING) return "";
+        Door door = facingDoor();
+        if (!hidden && door != null) return "[SPACE] " + (door.open ? "CLOSE DOOR" : "OPEN DOOR");
 
         if (gameOver || won) {
             return "";
@@ -1626,7 +1645,7 @@ final class Main extends JPanel {
     void emitSound(SoundType type, int x, int y, int loudness,
                    boolean byPlayer) {
 
-        long now = System.currentTimeMillis();
+        long now = gameNow();
 
         soundQueue.add(new SoundEvent(
                 type, x, y, loudness, byPlayer, now
@@ -1693,7 +1712,7 @@ final class Main extends JPanel {
     // SOUND LEVEL meter: blocky 10-segment bar (how loud the PLAYER is)
     void drawSoundMeter(Graphics2D g2, int x, int y) {
 
-        long now = System.currentTimeMillis();
+        long now = gameNow();
 
         Color c;
 
@@ -1812,7 +1831,7 @@ final class Main extends JPanel {
     // PLAYER AWARENESS meter: smooth dark-red bar with a frame and ticks
     void drawAwarenessMeter(Graphics2D g2, int x, int y) {
 
-        long now = System.currentTimeMillis();
+        long now = gameNow();
 
         int barW = NOISE_SEGMENTS * 13 - 2; // same width as the sound meter
 
@@ -1865,7 +1884,7 @@ final class Main extends JPanel {
     // The monster listens to everything that was emitted
     void processSounds() {
 
-        long now = System.currentTimeMillis();
+        long now = gameNow();
 
         while (!soundQueue.isEmpty()) {
 
@@ -1919,7 +1938,8 @@ final class Main extends JPanel {
         processSounds();
         updateSight();
 
-        long now = System.currentTimeMillis();
+        long now = gameNow();
+        if (now < monsterStunnedUntil) return;
 
         long interval = switch (monsterState) {
             case CHASE, LOSE_PLAYER -> CHASE_INTERVAL;
@@ -1976,8 +1996,7 @@ final class Main extends JPanel {
         );
 
         if (next != null) {
-            monsterX = next.x;
-            monsterY = next.y;
+            stepMonster(next);
         }
     }
 
@@ -2005,8 +2024,7 @@ final class Main extends JPanel {
             return;
         }
 
-        monsterX = next.x;
-        monsterY = next.y;
+        if (!stepMonster(next)) return;
 
         if (monsterX == targetX && monsterY == targetY) {
             arriveAtTarget();
@@ -2114,8 +2132,7 @@ final class Main extends JPanel {
             return;
         }
 
-        monsterX = next.x;
-        monsterY = next.y;
+        if (!stepMonster(next)) return;
     }
 
     void startPatrol() {
@@ -2147,8 +2164,7 @@ final class Main extends JPanel {
             return;
         }
 
-        monsterX = next.x;
-        monsterY = next.y;
+        if (!stepMonster(next)) return;
     }
 
     // Choose a random waypoint that isn't where we already are
@@ -2204,7 +2220,7 @@ final class Main extends JPanel {
                     continue;
                 }
 
-                if (visited[ny][nx] || isWall(nx, ny)) {
+                if (visited[ny][nx] || terrainWall(nx, ny)) {
                     continue;
                 }
 
@@ -2273,47 +2289,15 @@ final class Main extends JPanel {
     //  - the player or monster is inside either room it joins.
     // That means the occupied room keeps all its walls and doors.
     boolean isFrozen(int i, int playerSec, int monsterSec) {
-
         Connection c = conns[i];
-        int hall = HALL_BASE + i;
-
-        return playerSec == hall || monsterSec == hall ||
-                playerSec == c.a || playerSec == c.b ||
-                monsterSec == c.a || monsterSec == c.b;
+        return playerSec == HALL_BASE + i || monsterSec == HALL_BASE + i
+                || playerSec == roomAtSlot[c.a] || playerSec == roomAtSlot[c.b];
     }
 
     // Timer expired: figure out what is occupied, protect it,
     // and shift everything else.
-    void shiftRooms() {
-
-        int playerSec = sectionAt(playerX, playerY);
-        int monsterSec = sectionAt(monsterX, monsterY);
-
-        boolean[] frozen = new boolean[conns.length];
-
-        for (int i = 0; i < conns.length; i++) {
-            frozen[i] = isFrozen(i, playerSec, monsterSec);
-        }
-
-        int changed = reshuffleConnections(frozen);
-
-        applyLayout();
-
-        int moved = shuffleRoomContents(playerSec, monsterSec);
-        int rescued = relocateStrandedItems(playerSec);
-
-        if (DEBUG) {
-            System.out.println("Shift #" + shiftNumber
-                    + ": protected " + sectionName(playerSec)
-                    + " (player) and " + sectionName(monsterSec)
-                    + " (monster); " + changed + " hallways changed, "
-                    + moved + " items moved, "
-                    + rescued + " items rescued from walls");
-
-            if (isWall(playerX, playerY) || isWall(monsterX, monsterY)) {
-                System.out.println("WARNING: a character is inside a wall!");
-            }
-        }
+    boolean shiftRooms() {
+        return performRoomShift();
     }
 
     // Moves, seals or reopens every hallway that is not frozen.
@@ -2359,96 +2343,45 @@ final class Main extends JPanel {
         return changed;
     }
 
-    // Items lying in empty rooms get moved around inside that room
-    int shuffleRoomContents(int playerSec, int monsterSec) {
 
-        int moved = 0;
 
-        for (Item it : items) {
 
-            int s = sectionAt(it.x, it.y);
-
-            if (s < 0 || s >= ROOM_COUNT ||
-                    s == playerSec || s == monsterSec) {
-                continue;
-            }
-
-            if (random.nextDouble() < ITEM_SHUFFLE_CHANCE) {
-                Point p = freeTileInRoom(s);
-                it.x = p.x;
-                it.y = p.y;
-                moved++;
-            }
-        }
-
-        return moved;
-    }
-
-    // An item lying in a hallway that just got sealed would be inside a
-    // wall, so move it to a random room the player is not in.
-    int relocateStrandedItems(int playerSec) {
-
-        int rescued = 0;
-
-        for (Item it : items) {
-
-            if (!isWall(it.x, it.y)) {
-                continue;
-            }
-
-            int room;
-            int tries = 0;
-
-            do {
-                room = random.nextInt(ROOM_COUNT);
-                tries++;
-            } while (room == playerSec && tries < 20);
-
-            Point p = freeTileInRoom(room);
-            it.x = p.x;
-            it.y = p.y;
-            rescued++;
-        }
-
-        return rescued;
-    }
 
     void updateGame() {
-
-        if (warningSettingsOpen) return;
-
-        if (gameOver || won) {
-            updateWarningCues(System.currentTimeMillis());
+        if (warningSettingsOpen || viewMode == ViewMode.PAUSE || viewMode == ViewMode.MENU) {
+            warningCues.update(awareness, nearbyMonsterLevel(), false, gameNow());
             repaint();
             return;
         }
-
-        long now = System.currentTimeMillis();
-
-        updateNoise(now);
-
-        if (now >= nextShiftAt) {
-
-            shiftNumber++;
-
-            shiftRooms();
-
-            nextShiftAt = now + nextShiftDelay();
-
-            // The player only hears it, never sees it
-            message = "Somewhere, metal groans and the walls shift...";
+        if (gameOver || won) {
+            closeMap();
+            updateWarningCues(gameNow());
+            repaint();
+            return;
         }
-
+        long now = gameNow();
+        if (viewMode == ViewMode.MAP && now >= mapClosesAt) closeMap();
+        updateNoise(now);
+        if (now >= nextShiftAt) shiftPending = true;
+        if (shiftPending) shiftRooms();
         updateMonster();
-
-        updateAwareness(now); // after the AI has decided its new state
+        updateAwareness(now);
         updateWarningCues(now);
-
+        if (gameOver || won) closeMap();
         repaint();
     }
 
     void restartGame() {
-
+        resumeSimulation();
+        viewMode = ViewMode.PLAYING;
+        if (pausePanel != null) pausePanel.setVisible(false);
+        clearAllControls();
+        journal.clear();
+        shiftPending = false;
+        mapOpenedAt = -MAP_COOLDOWN_MS;
+        mapClosesAt = 0;
+        monsterStunnedUntil = 0;
+        lastDoorStunAt = -DOOR_STUN_COOLDOWN_MS;
         clearMovementInput();
 
         buildMap(); // new hallway lengths, rooms and connections
@@ -2498,7 +2431,7 @@ final class Main extends JPanel {
         pickPatrolPoint();
         spawnItems();
 
-        long now = System.currentTimeMillis();
+        long now = gameNow();
 
         nextShiftAt = now + nextShiftDelay();
         lastNoiseUpdate = now;
@@ -2509,6 +2442,8 @@ final class Main extends JPanel {
         playerHasStepped = false;
 
         message = "Find the keycard and escape!";
+        openOccupiedDoors();
+        observeArea();
 
         repaint();
     }
@@ -2694,16 +2629,16 @@ final class Main extends JPanel {
             }
         }
 
+        drawDoorsAndRoomLabels(g2);
+
         // Draw monster (only if the player can actually see it)
         // Normal play: only when its tile has no ceiling and it is in view.
-        // Debug: also shown when [M] reveal removed every ceiling.
-        if ((DEBUG && revealAll) ||
-                (canSeeTile(monsterX, monsterY) && playerSeesMonster())) {
+        if (canSeeTile(monsterX, monsterY) && playerSeesMonster()) {
 
             // The monster is a tall creature: feet on its tile, head
             // reaching into the tile above. It sways slowly even when
             // standing still, so it never looks frozen.
-            long spriteTime = System.currentTimeMillis();
+            long spriteTime = gameNow();
 
             BufferedImage monsterSprite = SpriteAssets.frame(
                     SpriteAssets.MONSTER, spriteTime, spriteTime, 250);
@@ -2721,8 +2656,10 @@ final class Main extends JPanel {
             }
         }
 
+        drawMonsterStun(g2);
+
         // Draw the player: sprite set depends on the facing direction
-        long playerTime = System.currentTimeMillis();
+        long playerTime = gameNow();
         BufferedImage[] playerFrames;
         boolean flipPlayer = false;
 
@@ -2813,6 +2750,10 @@ final class Main extends JPanel {
                 250, panelY + 54
         );
 
+        g2.drawString("Space: Door | M: " + (mapCooldownRemaining() == 0 ? "Map ready"
+                : "Map " + (long) Math.ceil(mapCooldownRemaining() / 1000.0) + "s")
+                + " | Esc: Pause", 250, panelY + 98);
+
         // Interaction prompt (only when something can be done)
         String prompt = interactionPrompt();
 
@@ -2826,7 +2767,7 @@ final class Main extends JPanel {
         if (DEBUG) {
 
             long remaining = Math.max(
-                    0, nextShiftAt - System.currentTimeMillis()
+                    0, nextShiftAt - gameNow()
             );
 
             long secs = remaining / 1000;
@@ -2842,8 +2783,7 @@ final class Main extends JPanel {
             );
 
             g2.drawString(
-                    "Protected: " + sectionName(protectedSec)
-                            + " + " + sectionName(monsterSec),
+                    "Protected: " + sectionName(protectedSec),
                     560, panelY + 28
             );
 
@@ -2854,8 +2794,7 @@ final class Main extends JPanel {
             );
 
             g2.drawString(
-                    revealAll ? "Ceilings off: ALL (reveal)"
-                            : "Ceiling off: " + sectionName(cur),
+                    "Ceiling off: " + sectionName(cur),
                     560, panelY + 56
             );
 
@@ -2875,7 +2814,7 @@ final class Main extends JPanel {
             );
 
             g2.drawString(
-                    "[M] reveal map: " + (revealAll ? "ON" : "off"),
+                    "[M] remembered map",
                     560, panelY + 98
             );
         }
@@ -2917,8 +2856,559 @@ final class Main extends JPanel {
                     ROWS * TILE / 2 + 35
             );
         }
+        if (viewMode == ViewMode.MAP) drawMemoryMap(g2);
+        else if (viewMode == ViewMode.PAUSE) {
+            g2.setColor(new Color(0, 0, 0, 205));
+            g2.fillRect(0, 0, COLS * TILE, ROWS * TILE + PANEL_H);
+        }
         g2.dispose();
     }
+
+    // -------------------------------------------------
+    // RUN MODES, PERSISTENT ROOMS, DOORS, AND REMEMBERED MAP
+    // -------------------------------------------------
+
+    enum ViewMode { PLAYING, MAP, PAUSE, MENU }
+
+    long gameNow() {
+        return (clockPaused ? pausedWallAt : wallClock.getAsLong()) - pausedMillis;
+    }
+
+    long movementNow() {
+        return (clockPaused ? pausedMovementAt : movementClock.getAsLong()) - pausedNanos;
+    }
+
+    void pauseSimulation() {
+        if (clockPaused) return;
+        pausedWallAt = wallClock.getAsLong();
+        pausedMovementAt = movementClock.getAsLong();
+        clockPaused = true;
+        suppressHeldMovement();
+        warningCues.update(awareness, nearbyMonsterLevel(), false, gameNow());
+    }
+
+    void resumeSimulation() {
+        if (!clockPaused) return;
+        pausedMillis += Math.max(0, wallClock.getAsLong() - pausedWallAt);
+        pausedNanos += Math.max(0, movementClock.getAsLong() - pausedMovementAt);
+        clockPaused = false;
+    }
+
+    boolean inputLocked() {
+        return viewMode != ViewMode.PLAYING || warningSettingsOpen || gameOver || won;
+    }
+
+    void suppressHeldMovement() {
+        suppressedMovementKeys.addAll(heldMovementKeys.keySet());
+        clearMovementInput();
+    }
+
+    void clearAllControls() {
+        clearMovementInput();
+        suppressedMovementKeys.clear();
+        heldActionKeys.clear();
+        mapKeyHeld = escapeKeyHeld = false;
+    }
+
+    void bindGameplayAction(int code, String name, Runnable action, boolean allowEnded) {
+        bindAction(KeyStroke.getKeyStroke(code, 0, false), name, () -> {
+            if (!heldActionKeys.add(code)) return;
+            if (viewMode != ViewMode.PLAYING || warningSettingsOpen) return;
+            if (!allowEnded && (gameOver || won)) return;
+            action.run();
+        });
+        getInputMap(WHEN_IN_FOCUSED_WINDOW).put(
+                KeyStroke.getKeyStroke(code, InputEvent.SHIFT_DOWN_MASK, false), name);
+        bindModifierVariants(code, true, name + "-released", () -> heldActionKeys.remove(code));
+    }
+
+    void toggleMap() {
+        if (viewMode == ViewMode.MAP) {
+            closeMap();
+        } else if (!inputLocked()) {
+            long now = gameNow();
+            if (now - mapOpenedAt < MAP_COOLDOWN_MS) {
+                message = "Map recharges in " + (long) Math.ceil(mapCooldownRemaining() / 1000.0) + "s.";
+                return;
+            }
+            mapOpenedAt = now;
+            mapClosesAt = now + MAP_DURATION_MS;
+            viewMode = ViewMode.MAP;
+            suppressHeldMovement();
+        }
+        repaint();
+    }
+
+    long mapCooldownRemaining() {
+        return Math.max(0, MAP_COOLDOWN_MS - (gameNow() - mapOpenedAt));
+    }
+
+    void closeMap() {
+        if (viewMode != ViewMode.MAP) return;
+        viewMode = ViewMode.PLAYING;
+        suppressHeldMovement();
+        repaint();
+    }
+
+    void handleEscape() {
+        if (warningSettingsOpen) return;
+        if (viewMode == ViewMode.MAP) closeMap();
+        else if (viewMode == ViewMode.PAUSE) resumeFromPause();
+        else if (viewMode == ViewMode.PLAYING) {
+            viewMode = ViewMode.PAUSE;
+            pauseSimulation();
+            movementTimer.stop();
+            resumeButton.setEnabled(!gameOver && !won);
+            pausePanel.setVisible(true);
+            revalidate();
+            repaint();
+        }
+    }
+
+    void resumeFromPause() {
+        if (viewMode != ViewMode.PAUSE) return;
+        viewMode = ViewMode.PLAYING;
+        pausePanel.setVisible(false);
+        resumeSimulation();
+        clearMovementInput();
+        if (isDisplayable()) movementTimer.start();
+        requestFocusInWindow();
+        repaint();
+    }
+
+    void initPausePanel() {
+        setLayout(new GridBagLayout());
+        pausePanel = new JPanel();
+        pausePanel.setLayout(new BoxLayout(pausePanel, BoxLayout.Y_AXIS));
+        pausePanel.setBackground(new Color(12, 10, 17));
+        pausePanel.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(170, 25, 38), 2),
+                BorderFactory.createEmptyBorder(24, 32, 24, 32)));
+        JLabel title = new JLabel("DEAD SIGNAL — PAUSED");
+        title.setForeground(new Color(210, 65, 70));
+        title.setFont(new Font("Monospaced", Font.BOLD, 20));
+        title.setAlignmentX(Component.CENTER_ALIGNMENT);
+        pausePanel.add(title);
+        pausePanel.add(Box.createVerticalStrut(20));
+        resumeButton = pauseButton("RESUME", this::resumeFromPause);
+        pausePanel.add(resumeButton);
+        pausePanel.add(Box.createVerticalStrut(12));
+        pausePanel.add(pauseButton("RETURN TO MAIN MENU", () -> {
+            if (ownerSession != null) ownerSession.showMenu();
+        }));
+        pausePanel.add(Box.createVerticalStrut(12));
+        pausePanel.add(pauseButton("EXIT GAME", () -> {
+            if (ownerSession != null) ownerSession.requestExit();
+        }));
+        pausePanel.setVisible(false);
+        add(pausePanel);
+    }
+
+    JButton pauseButton(String label, Runnable action) {
+        JButton button = new JButton(label);
+        button.setAlignmentX(Component.CENTER_ALIGNMENT);
+        button.setBackground(new Color(25, 18, 23));
+        button.setForeground(Color.WHITE);
+        button.setFont(new Font("Monospaced", Font.BOLD, 14));
+        button.setMaximumSize(new Dimension(290, 44));
+        button.setPreferredSize(new Dimension(290, 44));
+        button.setBorder(BorderFactory.createLineBorder(new Color(170, 25, 38), 2));
+        button.addActionListener(e -> action.run());
+        return button;
+    }
+
+    void suspendForMenu() {
+        pauseSimulation();
+        viewMode = ViewMode.MENU;
+        pausePanel.setVisible(false);
+        movementTimer.stop();
+        gameTimer.stop();
+        warningCues.audio.close();
+        clearAllControls();
+    }
+
+    void continueRun() {
+        viewMode = ViewMode.PLAYING;
+        pausePanel.setVisible(false);
+        resumeSimulation();
+        clearAllControls();
+    }
+
+    static final class GameSession {
+        final JFrame frame;
+        Main run;
+
+        GameSession(JFrame frame) { this.frame = frame; }
+
+        boolean canContinue() { return run != null && !run.gameOver && !run.won; }
+
+        void showMenu() {
+            if (run != null) run.suspendForMenu();
+            if (frame != null) show(new MainMenuPanel(frame, this));
+        }
+
+        void startNewGame() {
+            if (canContinue() && frame != null && JOptionPane.showConfirmDialog(frame,
+                    "Replace your current run with a new game?", "NEW GAME",
+                    JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
+            if (run != null) run.suspendForMenu();
+            run = new Main();
+            run.ownerSession = this;
+            if (frame != null) show(run);
+        }
+
+        void continueGame() {
+            if (!canContinue()) return;
+            run.continueRun();
+            if (frame != null) show(run);
+        }
+
+        void show(JPanel panel) {
+            frame.setContentPane(panel);
+            frame.revalidate();
+            frame.repaint();
+            panel.requestFocusInWindow();
+        }
+
+        void requestExit() {
+            if (frame == null) return;
+            if (run != null) {
+                if (run.viewMode == ViewMode.MAP) run.closeMap();
+                if (run.viewMode == ViewMode.PLAYING) run.handleEscape();
+            }
+            if (JOptionPane.showConfirmDialog(frame,
+                    "Exit the game? The in-memory run will be lost.", "EXIT GAME",
+                    JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) System.exit(0);
+        }
+    }
+
+    static final class Door {
+        final int roomId;
+        final int side;
+        boolean open = true;
+        boolean active;
+        boolean horizontalCorridor;
+        int x, y;
+        long glowUntil;
+
+        Door(int roomId, int side) { this.roomId = roomId; this.side = side; }
+    }
+
+    void initRoomIdentities() {
+        for (int room = 0; room < ROOM_COUNT; room++) {
+            roomAtSlot[room] = slotOfRoom[room] = room;
+            for (int side = 0; side < 4; side++) roomDoors[room][side] = new Door(room, side);
+        }
+    }
+
+    void rebuildDoors() {
+        for (Door[] doors : roomDoors) for (Door door : doors) door.active = false;
+        for (Connection c : conns) {
+            if (!c.open) continue;
+            int col = c.a % ROOM_COLS, row = c.a / ROOM_COLS;
+            Door a = roomDoors[roomAtSlot[c.a]][c.horizontal ? 1 : 2];
+            Door b = roomDoors[roomAtSlot[c.b]][c.horizontal ? 3 : 0];
+            a.active = b.active = true;
+            a.horizontalCorridor = b.horizontalCorridor = c.horizontal;
+            if (c.horizontal) {
+                a.x = roomX0[col] + ROOM_W;
+                b.x = roomX0[col + 1] - 1;
+                a.y = b.y = roomY0[row] + c.offset;
+            } else {
+                a.y = roomY0[row] + ROOM_H;
+                b.y = roomY0[row + 1] - 1;
+                a.x = b.x = roomX0[col] + c.offset;
+            }
+        }
+        forcingDoor = null;
+        doorForceStartedAt = -1;
+    }
+
+    Door doorAt(int x, int y) {
+        for (Door[] doors : roomDoors) for (Door door : doors) {
+            if (door != null && door.active && door.x == x && door.y == y) return door;
+        }
+        return null;
+    }
+
+    boolean terrainWall(int x, int y) {
+        return x < 0 || y < 0 || x >= COLS || y >= ROWS || map[y][x] == '#';
+    }
+
+    Door facingDoor() {
+        Door door = doorAt(playerX + faceX, playerY + faceY);
+        return door != null ? door : doorAt(playerX, playerY);
+    }
+
+    void toggleDoor() {
+        if (inputLocked() || hidden) return;
+        Door door = facingDoor();
+        if (door == null) { message = "Face an adjacent door and press Space."; return; }
+        if (door.open && ((playerX == door.x && playerY == door.y)
+                || (monsterX == door.x && monsterY == door.y))) {
+            message = "The doorway is occupied.";
+            return;
+        }
+        door.open = !door.open;
+        warningCues.audio.doorSound(!door.open);
+        emitSound(SoundType.DOOR, door.x, door.y, door.open ? 4 : 9);
+        message = door.open ? "You open the door." : "You close the door.";
+        long now = gameNow();
+        if (!door.open && Math.abs(monsterX - door.x) + Math.abs(monsterY - door.y) == 1
+                && now - lastDoorStunAt >= DOOR_STUN_COOLDOWN_MS) {
+            monsterStunnedUntil = now + DOOR_STUN_MS;
+            lastDoorStunAt = now;
+            door.glowUntil = monsterStunnedUntil;
+            forcingDoor = null;
+            doorForceStartedAt = -1;
+            message = "DOOR SLAM! The monster staggers.";
+        }
+        repaint();
+    }
+
+    boolean stepMonster(Point next) {
+        if (next == null || gameNow() < monsterStunnedUntil) return false;
+        Door door = doorAt(next.x, next.y);
+        if (door != null && !door.open) {
+            if (forcingDoor != door) {
+                forcingDoor = door;
+                doorForceStartedAt = gameNow();
+                if (canSeeTile(door.x, door.y)) message = "The monster is forcing the door...";
+            }
+            if (gameNow() - doorForceStartedAt >= DOOR_FORCE_MS) {
+                door.open = true;
+                warningCues.audio.doorSound(true);
+                forcingDoor = null;
+                doorForceStartedAt = -1;
+                if (canSeeTile(door.x, door.y)) message = "The monster forces the door open!";
+            }
+            return false;
+        }
+        forcingDoor = null;
+        doorForceStartedAt = -1;
+        monsterX = next.x;
+        monsterY = next.y;
+        return true;
+    }
+
+    record RoomAnchor(int room, int x, int y) { }
+    record ItemAnchor(Item item, RoomAnchor anchor) { }
+    record SoundAnchor(SoundEvent sound, RoomAnchor anchor) { }
+
+    RoomAnchor anchorAt(int x, int y) {
+        if (x < 0 || y < 0) return null;
+        int room = sectionAt(x, y);
+        if (room >= 0 && room < ROOM_COUNT) {
+            int[] origin = roomTile(room, 0, 0);
+            return new RoomAnchor(room, x - origin[0], y - origin[1]);
+        }
+        return new RoomAnchor(-1, x, y);
+    }
+
+    Point resolveAnchor(RoomAnchor anchor) {
+        if (anchor == null) return new Point(-1, -1);
+        if (anchor.room() >= 0) {
+            int[] point = roomTile(anchor.room(), anchor.x(), anchor.y());
+            return new Point(point[0], point[1]);
+        }
+        return terrainWall(anchor.x(), anchor.y())
+                ? nearestFloor(anchor.x(), anchor.y(), -1) : new Point(anchor.x(), anchor.y());
+    }
+
+    Point nearestFloor(int x, int y, int excludedRoom) {
+        Point best = null;
+        int distance = Integer.MAX_VALUE;
+        for (int row = 0; row < ROWS; row++) for (int col = 0; col < COLS; col++) {
+            int d = Math.abs(col - x) + Math.abs(row - y);
+            if (!terrainWall(col, row) && sectionAt(col, row) != excludedRoom && d < distance) {
+                best = new Point(col, row);
+                distance = d;
+            }
+        }
+        if (best == null) throw new IllegalStateException("No safe floor in connected facility");
+        return best;
+    }
+
+    boolean performRoomShift() {
+        int playerRoom = sectionAt(playerX, playerY);
+        if (playerRoom < 0 || playerRoom >= ROOM_COUNT) { shiftPending = true; return false; }
+        int monsterSection = sectionAt(monsterX, monsterY);
+        boolean[] frozen = new boolean[conns.length];
+        for (int i = 0; i < conns.length; i++) frozen[i] = isFrozen(i, playerRoom, monsterSection);
+        ArrayList<ItemAnchor> itemAnchors = new ArrayList<>();
+        for (Item item : items) itemAnchors.add(new ItemAnchor(item, anchorAt(item.x, item.y)));
+        RoomAnchor[] lockerAnchors = new RoomAnchor[lockers.length];
+        for (int i = 0; i < lockers.length; i++) lockerAnchors[i] = anchorAt(lockers[i][0], lockers[i][1]);
+        RoomAnchor monster = anchorAt(monsterX, monsterY);
+        RoomAnchor key = anchorAt(keyX, keyY), exit = anchorAt(exitX, exitY);
+        RoomAnchor target = anchorAt(targetX, targetY), lastSeen = anchorAt(lastSeenX, lastSeenY);
+        RoomAnchor patrol = anchorAt(patrolX, patrolY);
+        ArrayList<SoundAnchor> sounds = new ArrayList<>();
+        for (SoundEvent sound : soundQueue) sounds.add(new SoundAnchor(sound, anchorAt(sound.x, sound.y)));
+
+        ArrayList<Integer> movable = new ArrayList<>();
+        for (int room = 0; room < ROOM_COUNT; room++) if (room != playerRoom) movable.add(room);
+        Collections.shuffle(movable, random);
+        int[] oldSlots = slotOfRoom.clone();
+        for (int i = 0; i < movable.size(); i++) {
+            slotOfRoom[movable.get(i)] = oldSlots[movable.get((i + 1) % movable.size())];
+        }
+        for (int room = 0; room < ROOM_COUNT; room++) roomAtSlot[slotOfRoom[room]] = room;
+        reshuffleConnections(frozen);
+        initSections();
+        applyLayout();
+        rebuildDoors();
+        for (int room = 0; room < ROOM_COUNT; room++) waypoints[room] = roomTile(room, ROOM_W / 2, ROOM_H / 2);
+        for (int i = 0; i < lockers.length; i++) {
+            Point p = resolveAnchor(lockerAnchors[i]); lockers[i][0] = p.x; lockers[i][1] = p.y;
+        }
+        Point p = resolveAnchor(monster); monsterX = p.x; monsterY = p.y;
+        p = resolveAnchor(key); keyX = p.x; keyY = p.y;
+        p = resolveAnchor(exit); exitX = p.x; exitY = p.y;
+        p = resolveAnchor(target); targetX = p.x; targetY = p.y;
+        p = resolveAnchor(lastSeen); lastSeenX = p.x; lastSeenY = p.y;
+        p = resolveAnchor(patrol); patrolX = p.x; patrolY = p.y;
+        for (ItemAnchor entry : itemAnchors) {
+            RoomAnchor anchor = entry.anchor();
+            Point destination = anchor.room() < 0 && terrainWall(anchor.x(), anchor.y())
+                    ? nearestFloor(anchor.x(), anchor.y(), playerRoom) : resolveAnchor(anchor);
+            entry.item().x = destination.x; entry.item().y = destination.y;
+        }
+        soundQueue.clear();
+        for (SoundAnchor entry : sounds) {
+            p = resolveAnchor(entry.anchor());
+            SoundEvent sound = entry.sound();
+            soundQueue.add(new SoundEvent(sound.type, p.x, p.y, sound.loudness, sound.byPlayer, sound.time));
+        }
+        openOccupiedDoors();
+        shiftNumber++;
+        shiftPending = false;
+        nextShiftAt = gameNow() + nextShiftDelay();
+        observeArea();
+        message = "Metal groans. Other rooms have exchanged places...";
+        return true;
+    }
+
+    void openOccupiedDoors() {
+        for (Door[] doors : roomDoors) for (Door door : doors) {
+            if (!door.active) continue;
+            boolean occupied = (playerX == door.x && playerY == door.y)
+                    || (monsterX == door.x && monsterY == door.y) || itemAt(door.x, door.y);
+            if (occupied) door.open = true;
+        }
+    }
+
+    record RoomMemory(int roomId, int seenShift) { }
+    record LinkMemory(int a, int b, boolean open, int seenShift) { }
+
+    // Only player observations live here. There is deliberately no enemy data.
+    static final class MapJournal {
+        final RoomMemory[] rooms = new RoomMemory[ROOM_COUNT];
+        final LinkMemory[] links = new LinkMemory[CONN_COUNT];
+
+        void clear() { Arrays.fill(rooms, null); Arrays.fill(links, null); }
+
+        void observeRoom(int roomId, int slot, Connection[] connections, int shift) {
+            for (int i = 0; i < rooms.length; i++) {
+                if (rooms[i] != null && rooms[i].roomId() == roomId) rooms[i] = null;
+            }
+            rooms[slot] = new RoomMemory(roomId, shift);
+            for (int i = 0; i < connections.length; i++) {
+                Connection c = connections[i];
+                if (c.a == slot || c.b == slot) observeLink(i, c, shift);
+            }
+        }
+
+        void observeLink(int index, Connection c, int shift) {
+            links[index] = new LinkMemory(c.a, c.b, c.open, shift);
+        }
+
+        boolean stale(int shift) {
+            for (RoomMemory room : rooms) if (room != null && room.seenShift() < shift) return true;
+            for (LinkMemory link : links) if (link != null && link.seenShift() < shift) return true;
+            return false;
+        }
+    }
+
+    void observeArea() {
+        int area = sectionAt(playerX, playerY);
+        if (area >= 0 && area < ROOM_COUNT) journal.observeRoom(area, slotOfRoom[area], conns, shiftNumber);
+        else if (area >= HALL_BASE && area < HALL_BASE + CONN_COUNT) {
+            journal.observeLink(area - HALL_BASE, conns[area - HALL_BASE], shiftNumber);
+        }
+    }
+
+    void drawMemoryMap(Graphics2D graphics) {
+        Graphics2D g = (Graphics2D) graphics.create();
+        g.setColor(new Color(7, 9, 15));
+        g.fillRect(0, 0, COLS * TILE, ROWS * TILE + PANEL_H);
+        g.setFont(new Font("Monospaced", Font.BOLD, 24));
+        g.setColor(new Color(205, 65, 70));
+        g.drawString("FACILITY MAP — LAST KNOWN", 55, 65);
+        g.setFont(SMALL_FONT);
+        g.setColor(new Color(185, 190, 195));
+        g.drawString(String.format("Closes in %.1fs   |   M / Esc: close", Math.max(0, mapClosesAt - gameNow()) / 1000.0), 55, 100);
+        g.setColor(new Color(165, 150, 115));
+        g.drawString(journal.stale(shiftNumber) ? "Routes may have shifted. Revisit rooms to update them."
+                : "Only explored rooms are recorded.", 55, 130);
+        for (LinkMemory link : journal.links) {
+            if (link == null || journal.rooms[link.a()] == null || journal.rooms[link.b()] == null) continue;
+            int ax = 160 + link.a() % ROOM_COLS * 255, ay = 220 + link.a() / ROOM_COLS * 145;
+            int bx = 160 + link.b() % ROOM_COLS * 255, by = 220 + link.b() / ROOM_COLS * 145;
+            g.setColor(link.open() ? new Color(130, 140, 140) : new Color(95, 65, 65));
+            g.setStroke(link.open() ? new BasicStroke(5) : new BasicStroke(3, BasicStroke.CAP_BUTT,
+                    BasicStroke.JOIN_MITER, 10, new float[] {7, 6}, 0));
+            g.drawLine(ax, ay, bx, by);
+        }
+        int playerArea = sectionAt(playerX, playerY);
+        for (int slot = 0; slot < ROOM_COUNT; slot++) {
+            RoomMemory memory = journal.rooms[slot];
+            if (memory == null) continue;
+            int x = 85 + slot % ROOM_COLS * 255, y = 180 + slot / ROOM_COLS * 145;
+            boolean here = memory.roomId() == playerArea;
+            g.setColor(new Color(20, 25, 32)); g.fillRoundRect(x, y, 150, 80, 12, 12);
+            g.setColor(here ? PLAYER_COLOR : new Color(175, 150, 105));
+            g.setStroke(new BasicStroke(here ? 3 : 2)); g.drawRoundRect(x, y, 150, 80, 12, 12);
+            g.setFont(new Font("Monospaced", Font.BOLD, 19));
+            g.drawString("ROOM " + (memory.roomId() + 1), x + 36, y + 34);
+            if (here) { g.setFont(INFO_FONT); g.drawString("YOU ARE HERE", x + 35, y + 58); }
+        }
+        if (playerArea >= HALL_BASE) {
+            g.setColor(PLAYER_COLOR); g.setFont(SMALL_FONT);
+            g.drawString("You are in a hallway.", 55, 625);
+        }
+        g.setColor(new Color(180, 180, 185)); g.setFont(INFO_FONT);
+        g.drawString("Movement and interactions disabled. The facility is still active.", 55, 660);
+        g.dispose();
+    }
+
+    void drawDoorsAndRoomLabels(Graphics2D g) {
+        g.setFont(new Font("Monospaced", Font.BOLD, 10));
+        for (int room = 0; room < ROOM_COUNT; room++) {
+            int[] origin = roomTile(room, 0, 0);
+            if (!canSeeTile(origin[0], origin[1])) continue;
+            g.setColor(new Color(175, 155, 115));
+            g.drawString("ROOM " + (room + 1), origin[0] * TILE + 5, origin[1] * TILE + 12);
+        }
+        for (Door[] doors : roomDoors) for (Door door : doors) {
+            if (!door.active || !canSeeTile(door.x, door.y)) continue;
+            int x = door.x * TILE, y = door.y * TILE;
+            g.setColor(gameNow() < door.glowUntil ? new Color(255, 225, 135)
+                    : door.open ? new Color(100, 190, 160) : new Color(225, 170, 70));
+            g.setStroke(new BasicStroke(3)); g.drawRect(x + 2, y + 2, TILE - 4, TILE - 4);
+            if (door.horizontalCorridor) g.fillRect(x + (door.open ? 3 : TILE / 2 - 4), y + 3, 8, TILE - 6);
+            else g.fillRect(x + 3, y + (door.open ? 3 : TILE / 2 - 4), TILE - 6, 8);
+            g.setColor(Color.WHITE); g.fillOval(x + TILE / 2 - 1, y + TILE / 2 - 1, 3, 3);
+        }
+        g.setStroke(new BasicStroke(1));
+    }
+
+    void drawMonsterStun(Graphics2D g) {
+        if (gameNow() >= monsterStunnedUntil || !canSeeTile(monsterX, monsterY) || !playerSeesMonster()) return;
+        g.setColor(new Color(255, 225, 135)); g.setFont(PROMPT_FONT);
+        g.drawString("* * *", monsterX * TILE - 3, monsterY * TILE - 3);
+    }
+
 
     // -------------------------------------------------
     // WARNING AUDIO AND VISUALS (player feedback only)
@@ -3046,15 +3536,29 @@ final class Main extends JPanel {
         private double stingTime = -1;
         private long seenSting = -1;
         private long seenGeneration = -1;
+        private long seenDoor;
+        private double doorTime = -1;
+        private boolean doorClosed;
         double pulse;
 
         void render(byte[] pcm, CueMix mix) {
+            render(pcm, mix, 0, false);
+        }
+
+        void render(byte[] pcm, CueMix mix, long doorSerial, boolean closed) {
             if (mix.generation() != seenGeneration) {
                 awareness = proximity = gain = phase = time = hiss = 0;
                 stingTime = -1;
                 seenGeneration = mix.generation();
                 seenSting = mix.sting();
+                seenDoor = doorSerial;
+                doorTime = -1;
             }
+            if (seenDoor != doorSerial) {
+                seenDoor = doorSerial;
+                if (mix.active() && mix.volume() > 0) { doorTime = 0; doorClosed = closed; }
+            }
+            if (!mix.active() || mix.volume() == 0) doorTime = -1;
             if (mix.sting() != seenSting) {
                 seenSting = mix.sting();
                 if (mix.active() && mix.volume() > 0) stingTime = 0;
@@ -3086,6 +3590,14 @@ final class Main extends JPanel {
                     stingTime += 1.0 / CUE_SAMPLE_RATE;
                     if (stingTime >= 0.8) stingTime = -1;
                 }
+                if (doorTime >= 0) {
+                    double duration = doorClosed ? 0.35 : 0.12;
+                    sample += (doorClosed ? 0.20 : 0.07) * Math.min(1, doorTime / 0.008)
+                            * Math.exp(-doorTime * (doorClosed ? 13 : 35))
+                            * (2.0 * hiss + Math.sin(2 * Math.PI * 110 * doorTime));
+                    doorTime += 1.0 / CUE_SAMPLE_RATE;
+                    if (doorTime >= duration) doorTime = -1;
+                }
                 // Smooth gain changes avoid clicks; muted output becomes exact silence.
                 double output = gain < 0.00001 ? 0 : sample * gain;
                 short value = (short) Math.round(Math.max(-0.9, Math.min(0.9, output)) * 32767);
@@ -3100,6 +3612,13 @@ final class Main extends JPanel {
         static final AudioFormat FORMAT = new AudioFormat(CUE_SAMPLE_RATE, 16, 1, true, false);
         volatile CueMix target = new CueMix(0, 0, 0, false, 0, 0);
         private volatile AudioSession session;
+        private volatile long doorSerial;
+        private volatile boolean doorClosed;
+
+        void doorSound(boolean closed) {
+            doorClosed = closed;
+            doorSerial++;
+        }
 
         synchronized void start() {
             if (session != null || GraphicsEnvironment.isHeadless()) return;
@@ -3144,7 +3663,7 @@ final class Main extends JPanel {
                     CueSynth synth = new CueSynth();
                     byte[] block = new byte[1024];
                     while (running) {
-                        synth.render(block, target);
+                        synth.render(block, target, doorSerial, doorClosed);
                         pulse = synth.pulse;
                         int offset = 0;
                         while (running && offset < block.length) {
@@ -3191,6 +3710,7 @@ final class Main extends JPanel {
 
         private final Color red = new Color(170, 25, 38);
         private final JFrame frame;
+        private final GameSession session;
         private final JPanel menuColumn = new JPanel();
         private final GridLayout buttonLayout = new GridLayout(5, 1);
         private final JPanel buttons = new JPanel(buttonLayout);
@@ -3204,7 +3724,12 @@ final class Main extends JPanel {
         private int appliedTextWidth = -1;
 
         MainMenuPanel(JFrame frame) {
+            this(frame, new GameSession(frame));
+        }
+
+        MainMenuPanel(JFrame frame, GameSession session) {
             this.frame = frame;
+            this.session = session;
             setPreferredSize(new Dimension(DESIGN_WIDTH, DESIGN_HEIGHT));
             setLayout(new BorderLayout());
             setBackground(Color.BLACK);
@@ -3238,8 +3763,8 @@ final class Main extends JPanel {
 
             JButton continueGame = createButton("CONTINUE");
             buttons.add(continueGame);
-            continueGame.addActionListener(e -> JOptionPane.showMessageDialog(
-                    frame, "No saved game found.", "CONTINUE", JOptionPane.WARNING_MESSAGE));
+            continueGame.setEnabled(session.canContinue());
+            continueGame.addActionListener(e -> session.continueGame());
 
             JButton settings = createButton("SETTINGS");
             buttons.add(settings);
@@ -3253,12 +3778,7 @@ final class Main extends JPanel {
 
             JButton exit = createButton("EXIT GAME");
             buttons.add(exit);
-            exit.addActionListener(e -> {
-                int answer = JOptionPane.showConfirmDialog(frame,
-                        "Are you sure you want to leave the nightmare?", "EXIT GAME",
-                        JOptionPane.YES_NO_OPTION);
-                if (answer == JOptionPane.YES_OPTION) System.exit(0);
-            });
+            exit.addActionListener(e -> session.requestExit());
 
             // Keep the existing atmosphere stable when buttons repaint on hover.
             Random random = new Random();
@@ -3341,11 +3861,7 @@ final class Main extends JPanel {
         }
 
         private void startGame() {
-            Main game = new Main();
-            frame.setContentPane(game);
-            frame.revalidate();
-            frame.repaint();
-            game.requestFocusInWindow();
+            session.startNewGame();
         }
 
         private JButton createButton(String text) {
@@ -3358,6 +3874,7 @@ final class Main extends JPanel {
             button.setCursor(new Cursor(Cursor.HAND_CURSOR));
             button.addMouseListener(new MouseAdapter() {
                 @Override public void mouseEntered(MouseEvent e) {
+                    if (!button.isEnabled()) return;
                     button.setBackground(new Color(115, 18, 30));
                     button.setBorder(BorderFactory.createLineBorder(new Color(220, 45, 55), 2));
                 }
@@ -3423,9 +3940,12 @@ final class Main extends JPanel {
 
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("DEAD SIGNAL: THE SHIFTING FACILITY");
-            frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-
-            frame.setContentPane(new MainMenuPanel(frame));
+            GameSession session = new GameSession(frame);
+            frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+            frame.addWindowListener(new WindowAdapter() {
+                @Override public void windowClosing(WindowEvent event) { session.requestExit(); }
+            });
+            session.showMenu();
 
             frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
             frame.setMinimumSize(new Dimension(1000, 700));
