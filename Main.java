@@ -20,40 +20,43 @@ final class Main extends JPanel {
     // CHARACTER SPRITES
     // -------------------------------------------------
 
-    // PNG files live in src/main/resources/assets/player and .../monster.
+    // PNGs in assets/player and assets/monster are bundled with the game.
     // They are loaded from the classpath, so no computer-specific paths.
     static final class SpriteAssets {
 
-        // Side-view sprites face LEFT. Set to false if yours face right.
-        static final boolean SIDE_SPRITES_FACE_LEFT = true;
-
-        static final BufferedImage[] PLAYER_FRONT = loadFrames(
-                "player/tambay1front.png",
-                "player/tambay2.png",
-                "player/Tambay-3.png"
+        // One crop for all directions keeps the supplied feet and scale aligned.
+        // Each direction is ordered: idle, walk 01, walk 02.
+        private static final BufferedImage[] PLAYER_FRAMES = loadFrames(
+                "player/player_idle_front.png",
+                "player/player_walk_front_01.png",
+                "player/player_walk_front_02.png",
+                "player/player_idle_back.png",
+                "player/player_walk_back_01.png",
+                "player/player_walk_back_02.png",
+                "player/player_idle_left.png",
+                "player/player_walk_left_01.png",
+                "player/player_walk_left_02.png",
+                "player/player_idle_right.png",
+                "player/player_walk_right_01.png",
+                "player/player_walk_right_02.png"
         );
-        static final BufferedImage[] PLAYER_SIDE = loadFrames(
-                "player/tambay4.png",
-                "player/tambay5.png",
-                "player/tambay6.png",
-                "player/tambay7.png"
+        static final BufferedImage[] PLAYER_FRONT = Arrays.copyOfRange(PLAYER_FRAMES, 0, 3);
+        static final BufferedImage[] PLAYER_BACK = Arrays.copyOfRange(PLAYER_FRAMES, 3, 6);
+        static final BufferedImage[] PLAYER_LEFT = Arrays.copyOfRange(PLAYER_FRAMES, 6, 9);
+        static final BufferedImage[] PLAYER_RIGHT = Arrays.copyOfRange(PLAYER_FRAMES, 9, 12);
+        // Crop all six frames together so both directions share one canvas
+        // and foot baseline. The supplied artwork already contains both sides.
+        private static final BufferedImage[] MONSTER_FRAMES = loadFrames(
+                "monster/monster_walk_right_01.png",
+                "monster/monster_walk_right_02.png",
+                "monster/monster_walk_right_03.png",
+                "monster/monster_walk_left_01.png",
+                "monster/monster_walk_left_02.png",
+                "monster/monster_walk_left_03.png"
         );
-        static final BufferedImage[] PLAYER_BACK = loadFrames(
-                "player/tambay8.png",
-                "player/tambay9.png",
-                "player/tambay10.png",
-                "player/tambay11.png",
-                "player/tambay12.png"
-        );
-        // Only a front view exists, so every direction uses these frames
-        static final BufferedImage[] MONSTER = loadFrames(
-                "monster/tikbalang1.png",
-                "monster/Tikabalang2.png",
-                "monster/tikbalang3.png",
-                "monster/tikabalang4.png",
-                "monster/tikbalang5.png",
-                "monster/tikbalang6.png"
-        );
+        static final BufferedImage[] MONSTER_WALK_RIGHT = Arrays.copyOfRange(MONSTER_FRAMES, 0, 3);
+        static final BufferedImage[] MONSTER_WALK_LEFT = Arrays.copyOfRange(MONSTER_FRAMES, 3, 6);
+        static final BufferedImage ROOM_ONE = loadSprite("rooms/room_01.png");
 
         // Loads a group of frames and crops them all to the SAME box, so the
         // character keeps one size and its feet stay in the same place.
@@ -521,6 +524,8 @@ final class Main extends JPanel {
     long mapClosesAt;
     long monsterStunnedUntil;
     long lastDoorStunAt = -DOOR_STUN_COOLDOWN_MS;
+    boolean monsterFacingLeft;
+    long lastMonsterStepAt = Long.MIN_VALUE / 2;
     Door forcingDoor;
     long doorForceStartedAt = -1;
     boolean mapKeyHeld, escapeKeyHeld;
@@ -2427,6 +2432,8 @@ final class Main extends JPanel {
         searchTicksLeft = 0;
 
         monsterState = MonsterState.PATROLLING;
+        monsterFacingLeft = false;
+        lastMonsterStepAt = Long.MIN_VALUE / 2;
 
         pickPatrolPoint();
         spawnItems();
@@ -2487,6 +2494,43 @@ final class Main extends JPanel {
                     px + TILE / 4, py + TILE / 4,
                     TILE / 2, TILE / 2);
         }
+    }
+
+    BufferedImage currentPlayerSprite() {
+        BufferedImage[] frames;
+        if (faceY > 0) frames = SpriteAssets.PLAYER_FRONT;
+        else if (faceY < 0) frames = SpriteAssets.PLAYER_BACK;
+        else frames = faceX < 0 ? SpriteAssets.PLAYER_LEFT : SpriteAssets.PLAYER_RIGHT;
+        return SpriteAssets.frame(frames, gameNow(), lastPlayerMove, 130);
+    }
+
+    BufferedImage currentMonsterSprite() {
+        BufferedImage[] frames = monsterFacingLeft
+                ? SpriteAssets.MONSTER_WALK_LEFT : SpriteAssets.MONSTER_WALK_RIGHT;
+        if (gameNow() < monsterStunnedUntil) return frames[0];
+        return SpriteAssets.frame(frames, gameNow(), lastMonsterStepAt, 180);
+    }
+
+    void drawRoomOneBackground(Graphics2D graphics) {
+        if (SpriteAssets.ROOM_ONE == null) return;
+        int[] origin = roomTile(0, 0, 0);
+        // The artwork belongs to persistent Room 1, including after a shift.
+        // Clip to uncovered floor: the background cannot reveal a hidden room.
+        java.awt.geom.Area visibleFloor = new java.awt.geom.Area();
+        for (int y = origin[1]; y < origin[1] + ROOM_H; y++) {
+            for (int x = origin[0]; x < origin[0] + ROOM_W; x++) {
+                if (!isCovered(x, y) && !terrainWall(x, y)) {
+                    visibleFloor.add(new java.awt.geom.Area(new Rectangle(x * TILE, y * TILE, TILE, TILE)));
+                }
+            }
+        }
+        Graphics2D g = (Graphics2D) graphics.create();
+        g.clip(visibleFloor);
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        g.drawImage(SpriteAssets.ROOM_ONE, origin[0] * TILE, origin[1] * TILE,
+                ROOM_W * TILE, ROOM_H * TILE, null);
+        g.dispose();
     }
 
     @Override
@@ -2581,6 +2625,8 @@ final class Main extends JPanel {
             }
         }
 
+        drawRoomOneBackground(g2);
+
         // Draw lockers
         g2.setColor(LOCKER_COLOR);
 
@@ -2635,13 +2681,8 @@ final class Main extends JPanel {
         // Normal play: only when its tile has no ceiling and it is in view.
         if (canSeeTile(monsterX, monsterY) && playerSeesMonster()) {
 
-            // The monster is a tall creature: feet on its tile, head
-            // reaching into the tile above. It sways slowly even when
-            // standing still, so it never looks frozen.
-            long spriteTime = gameNow();
-
-            BufferedImage monsterSprite = SpriteAssets.frame(
-                    SpriteAssets.MONSTER, spriteTime, spriteTime, 250);
+            // Keep its feet on the tile and animate successful steps only.
+            BufferedImage monsterSprite = currentMonsterSprite();
 
             SpriteAssets.draw(g2, monsterSprite,
                     monsterX * TILE + TILE / 2,
@@ -2658,29 +2699,14 @@ final class Main extends JPanel {
 
         drawMonsterStun(g2);
 
-        // Draw the player: sprite set depends on the facing direction
-        long playerTime = gameNow();
-        BufferedImage[] playerFrames;
-        boolean flipPlayer = false;
-
-        if (faceY > 0) {
-            playerFrames = SpriteAssets.PLAYER_FRONT;
-        } else if (faceY < 0) {
-            playerFrames = SpriteAssets.PLAYER_BACK;
-        } else {
-            playerFrames = SpriteAssets.PLAYER_SIDE;
-            flipPlayer = SpriteAssets.SIDE_SPRITES_FACE_LEFT
-                    ? faceX > 0 : faceX < 0;
-        }
-
-        BufferedImage playerSprite = SpriteAssets.frame(
-                playerFrames, playerTime, lastPlayerMove, 130);
+        // Both side directions have their own supplied artwork.
+        BufferedImage playerSprite = currentPlayerSprite();
 
         SpriteAssets.draw(g2, playerSprite,
                 playerX * TILE + TILE / 2,
                 playerY * TILE + TILE,
                 TILE - 3, TILE,
-                hidden ? 0.38f : 1.0f, flipPlayer);
+                hidden ? 0.38f : 1.0f, false);
 
         if (playerSprite == null) { // sprite missing: old placeholder
             g2.setColor(hidden
@@ -3190,6 +3216,8 @@ final class Main extends JPanel {
         }
         forcingDoor = null;
         doorForceStartedAt = -1;
+        if (next.x != monsterX) monsterFacingLeft = next.x < monsterX;
+        lastMonsterStepAt = gameNow();
         monsterX = next.x;
         monsterY = next.y;
         return true;

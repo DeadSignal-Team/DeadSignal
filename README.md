@@ -124,9 +124,33 @@ The native checks require a desktop session and verify decoding, playback comple
 
 ## Sprite images
 
-Sprite assets are not included in the initial repository. The game uses its built-in fallback shapes when an image cannot be loaded.
+The twelve approved player sprites are bundled under `assets/player/`.
+Each of `front`, `back`, `left`, and `right` has `player_idle_<direction>.png`
+and `player_walk_<direction>_01.png` / `_02.png`.
+White clothing stays opaque; the background is transparent. The PNGs retain
+their original 64x64 canvases and colors. All twelve share a common render crop,
+so changing direction keeps the same scale and foot baseline. Left and right
+use the supplied direction-specific artwork. Existing movement timing, hiding
+transparency, and missing-image fallback behavior are retained.
 
-The source looks for player and monster images under `/assets/` on the classpath, `src/main/resources/assets/`, or `assets/` relative to the working directory. The filenames and letter casing are listed in `SpriteAssets` inside `Main.java`. Add the actual images in a later pull request if both collaborators want them tracked.
+The six supplied monster frames are included as transparent PNGs under `assets/monster/`:
+`monster_walk_right_01.png` through `monster_walk_right_03.png`, and
+`monster_walk_left_01.png` through `monster_walk_left_03.png`.
+They retain their original 64x64 canvases and frame order. Pixel-based removal
+clears the white background, limb gaps, facial white patches, and pale JPEG edge
+fringes. Retained pixels keep their original colors. The Downloads originals remain unchanged.
+
+Successful horizontal steps choose the corresponding direction. Vertical movement
+keeps the last side facing; standing still or being stunned holds the first frame.
+All six frames share the same crop and foot baseline. Missing sprites still use
+the game's fallback shapes.
+
+`assets/rooms/room_01.png` is the supplied Room 1 background, copied unchanged.
+It is drawn with nearest-neighbor sampling beneath actors, items, and doors, and
+stays attached to Room 1 when rooms exchange locations. Covered rooms remain
+hidden. Its furniture is decorative and does not add collision or interactions.
+
+The source looks for player and monster images under `/assets/` on the classpath, `src/main/resources/assets/`, or `assets/` relative to the working directory. The filenames and letter casing are listed in `SpriteAssets` inside `Main.java`.
 
 ## Working together
 
