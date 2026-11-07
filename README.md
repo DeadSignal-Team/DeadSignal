@@ -33,13 +33,38 @@ Choose **NEW GAME** from the menu to start. Compiled files stay in the ignored `
 | F | Hide in or leave a locker |
 | R | Restart |
 | P | Warning volume and reduced-effects settings (pauses gameplay) |
-| M, while debug mode is enabled | Reveal the map |
+| Space | Open/close the adjacent door you face |
+| M | Open/close the remembered map |
+| Esc | Close the map, or open/close the pause menu |
 
 Hold a direction to keep moving. The most recently pressed direction takes priority;
 release it to resume another direction you are still holding. Shift changes between
 walking and running while moving. Switching away from the window clears held input.
 
 The imported source has `DEBUG = true`. In this mode, shifts happen every 30 seconds and the random generator uses a fixed seed. Normal mode uses a 2–3 minute shift interval. The initial import preserves these settings.
+
+## Rooms and doors
+
+Every room has a persistent number and keeps its items, lockers, objectives, and door states when it changes location. Each shift exchanges all rooms except the player's current room. The monster travels with its room when applicable, and hallway routes can also change. Room contents are not randomly regenerated or shuffled: existing items retain their identity and local room positions. A loose item stranded by a changed hallway is moved to nearby valid floor, without creating or deleting items.
+
+If a shift becomes due while the player is in a hallway, one shift waits until the player enters a room. That newly entered room is protected, and the next interval starts after the queued shift executes.
+
+Visible doorframes have thicker outlines: green for open, amber for closed. Closed doors block movement and sight and muffle noise. Close an unoccupied doorway while the monster is immediately beside it to stun it for **2 seconds**. The monster has an **8-second stun cooldown** and can force a closed ordinary door open after a **2.5-second windup**. The keycard-locked exit remains a separate objective.
+
+## Map and Continue
+
+The map opens for at most **10 seconds**, and its **25-second cooldown starts when opened**. Closing early does not reset that cooldown. While it is open, player movement, item/locker/door actions, restart, and settings are disabled. **The monster and room-shift clock keep running.** M or Esc closes the map; getting caught closes it automatically.
+
+The map records explored rooms and last-observed connections. Unexplored rooms are hidden, the monster is never drawn, and opening the map does not rescan the facility. Shifts can make its information outdated; revisiting rooms refreshes local observations. It replaces the previous M debug-reveal shortcut.
+
+Esc opens a pause menu with Resume, Return to Main Menu, and Exit Game. Returning to the main menu preserves the same run for **Continue**. Gameplay, door/stun timers, shifts, and map cooldown freeze while paused or in the menu. Continue is available for a live run while the application remains open. Exiting the application loses that in-memory run; starting New Game asks before replacing it.
+
+To check room exchanges, item conservation, doors, map behavior, and pause/Continue:
+
+```shell
+javac --release 17 -d build/test-classes Main.java tests/FacilityGameplayTest.java
+java "-Djava.awt.headless=true" -cp build/test-classes com.mycompany.deadsignal.FacilityGameplayTest build/facility-previews
+```
 
 ## Warning cues
 
