@@ -20,31 +20,30 @@ final class Main extends JPanel {
     // CHARACTER SPRITES
     // -------------------------------------------------
 
-    // PNG files live in src/main/resources/assets/player and .../monster.
+    // PNGs in assets/player and assets/monster are bundled with the game.
     // They are loaded from the classpath, so no computer-specific paths.
     static final class SpriteAssets {
 
-        // Side-view sprites face LEFT. Set to false if yours face right.
-        static final boolean SIDE_SPRITES_FACE_LEFT = true;
-
-        static final BufferedImage[] PLAYER_FRONT = loadFrames(
-                "player/tambay1front.png",
-                "player/tambay2.png",
-                "player/Tambay-3.png"
+        // One crop for all directions keeps the supplied feet and scale aligned.
+        // Each direction is ordered: idle, walk 01, walk 02.
+        private static final BufferedImage[] PLAYER_FRAMES = loadFrames(
+                "player/player_idle_front.png",
+                "player/player_walk_front_01.png",
+                "player/player_walk_front_02.png",
+                "player/player_idle_back.png",
+                "player/player_walk_back_01.png",
+                "player/player_walk_back_02.png",
+                "player/player_idle_left.png",
+                "player/player_walk_left_01.png",
+                "player/player_walk_left_02.png",
+                "player/player_idle_right.png",
+                "player/player_walk_right_01.png",
+                "player/player_walk_right_02.png"
         );
-        static final BufferedImage[] PLAYER_SIDE = loadFrames(
-                "player/tambay4.png",
-                "player/tambay5.png",
-                "player/tambay6.png",
-                "player/tambay7.png"
-        );
-        static final BufferedImage[] PLAYER_BACK = loadFrames(
-                "player/tambay8.png",
-                "player/tambay9.png",
-                "player/tambay10.png",
-                "player/tambay11.png",
-                "player/tambay12.png"
-        );
+        static final BufferedImage[] PLAYER_FRONT = Arrays.copyOfRange(PLAYER_FRAMES, 0, 3);
+        static final BufferedImage[] PLAYER_BACK = Arrays.copyOfRange(PLAYER_FRAMES, 3, 6);
+        static final BufferedImage[] PLAYER_LEFT = Arrays.copyOfRange(PLAYER_FRAMES, 6, 9);
+        static final BufferedImage[] PLAYER_RIGHT = Arrays.copyOfRange(PLAYER_FRAMES, 9, 12);
         // Crop all six frames together so both directions share one canvas
         // and foot baseline. The supplied artwork already contains both sides.
         private static final BufferedImage[] MONSTER_FRAMES = loadFrames(
@@ -2497,6 +2496,14 @@ final class Main extends JPanel {
         }
     }
 
+    BufferedImage currentPlayerSprite() {
+        BufferedImage[] frames;
+        if (faceY > 0) frames = SpriteAssets.PLAYER_FRONT;
+        else if (faceY < 0) frames = SpriteAssets.PLAYER_BACK;
+        else frames = faceX < 0 ? SpriteAssets.PLAYER_LEFT : SpriteAssets.PLAYER_RIGHT;
+        return SpriteAssets.frame(frames, gameNow(), lastPlayerMove, 130);
+    }
+
     BufferedImage currentMonsterSprite() {
         BufferedImage[] frames = monsterFacingLeft
                 ? SpriteAssets.MONSTER_WALK_LEFT : SpriteAssets.MONSTER_WALK_RIGHT;
@@ -2692,29 +2699,14 @@ final class Main extends JPanel {
 
         drawMonsterStun(g2);
 
-        // Draw the player: sprite set depends on the facing direction
-        long playerTime = gameNow();
-        BufferedImage[] playerFrames;
-        boolean flipPlayer = false;
-
-        if (faceY > 0) {
-            playerFrames = SpriteAssets.PLAYER_FRONT;
-        } else if (faceY < 0) {
-            playerFrames = SpriteAssets.PLAYER_BACK;
-        } else {
-            playerFrames = SpriteAssets.PLAYER_SIDE;
-            flipPlayer = SpriteAssets.SIDE_SPRITES_FACE_LEFT
-                    ? faceX > 0 : faceX < 0;
-        }
-
-        BufferedImage playerSprite = SpriteAssets.frame(
-                playerFrames, playerTime, lastPlayerMove, 130);
+        // Both side directions have their own supplied artwork.
+        BufferedImage playerSprite = currentPlayerSprite();
 
         SpriteAssets.draw(g2, playerSprite,
                 playerX * TILE + TILE / 2,
                 playerY * TILE + TILE,
                 TILE - 3, TILE,
-                hidden ? 0.38f : 1.0f, flipPlayer);
+                hidden ? 0.38f : 1.0f, false);
 
         if (playerSprite == null) { // sprite missing: old placeholder
             g2.setColor(hidden
