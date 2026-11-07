@@ -1,0 +1,4 @@
+{
+    "java.project.referencedLibraries": [".deps/javafx-17.0.21-win/*.jar"],
+    "java.debug.settings.forceBuildBeforeLaunch": false
+}

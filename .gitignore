@@ -3,6 +3,7 @@
 /build/
 /out/
 /target/
+/.deps/
 
 # JVM crash and profiling output
 hs_err_pid*.log
