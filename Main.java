@@ -2,9 +2,13 @@ package com.mycompany.deadsignal;
 
 import javax.swing.*;
 import javax.swing.Timer; // Fixes the ambiguity with java.util.Timer
+
+import com.mycompany.deadsignal.Main.MainMenuPanel;
+
 import java.awt.*;
 import java.awt.event.*;
 import java.util.*;
+import java.util.Queue;
 import java.util.function.LongSupplier;
 import java.io.*;
 import javax.imageio.ImageIO;
@@ -56,7 +60,20 @@ final class Main extends JPanel {
         );
         static final BufferedImage[] MONSTER_WALK_RIGHT = Arrays.copyOfRange(MONSTER_FRAMES, 0, 3);
         static final BufferedImage[] MONSTER_WALK_LEFT = Arrays.copyOfRange(MONSTER_FRAMES, 3, 6);
-        static final BufferedImage ROOM_ONE = loadSprite("rooms/room_01.png");
+        static final BufferedImage[] ROOM_BACKGROUNDS = {
+        loadSprite("rooms/room_01.png"),
+        loadSprite("rooms/room_02.png"),
+        loadSprite("rooms/room_03.png"),
+        loadSprite("rooms/room_04.png"),
+        loadSprite("rooms/room_05.png"),
+        loadSprite("rooms/room_06.png"),
+        loadSprite("rooms/room_07.png"),
+        loadSprite("rooms/room_08.png"),
+        loadSprite("rooms/room_09.png")
+};
+static final BufferedImage HALLWAY = loadSprite("rooms/hallway.png");
+
+
 
         // Loads a group of frames and crops them all to the SAME box, so the
         // character keeps one size and its feet stay in the same place.
@@ -1376,9 +1393,14 @@ final class Main extends JPanel {
 
         observeArea();
         checkCollision();
-        if (gameOver || won) {
-            clearMovementInput();
-        }
+            if (gameOver || won) {
+                clearMovementInput();
+    }
+
+            if (won && ownerSession != null) {
+                ownerSession.playEnding();
+    }
+
         repaint();
     }
 
@@ -2512,27 +2534,34 @@ final class Main extends JPanel {
     }
 
     void drawRoomOneBackground(Graphics2D graphics) {
-        if (SpriteAssets.ROOM_ONE == null) return;
-        int[] origin = roomTile(0, 0, 0);
-        // The artwork belongs to persistent Room 1, including after a shift.
-        // Clip to uncovered floor: the background cannot reveal a hidden room.
-        java.awt.geom.Area visibleFloor = new java.awt.geom.Area();
-        for (int y = origin[1]; y < origin[1] + ROOM_H; y++) {
-            for (int x = origin[0]; x < origin[0] + ROOM_W; x++) {
-                if (!isCovered(x, y) && !terrainWall(x, y)) {
-                    visibleFloor.add(new java.awt.geom.Area(new Rectangle(x * TILE, y * TILE, TILE, TILE)));
-                }
+    drawRoomBackground(graphics, 0);
+}
+
+void drawRoomBackground(Graphics2D graphics, int roomId) {
+    BufferedImage background = SpriteAssets.ROOM_BACKGROUNDS[roomId];
+    if (background == null) return;
+
+    int[] origin = roomTile(roomId, 0, 0);
+    java.awt.geom.Area visibleFloor = new java.awt.geom.Area();
+
+    for (int y = origin[1]; y < origin[1] + ROOM_H; y++) {
+        for (int x = origin[0]; x < origin[0] + ROOM_W; x++) {
+            if (!isCovered(x, y) && !terrainWall(x, y)) {
+                visibleFloor.add(new java.awt.geom.Area(
+                        new Rectangle(x * TILE, y * TILE, TILE, TILE)));
             }
         }
-        Graphics2D g = (Graphics2D) graphics.create();
-        g.clip(visibleFloor);
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
-                RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        g.drawImage(SpriteAssets.ROOM_ONE, origin[0] * TILE, origin[1] * TILE,
-                ROOM_W * TILE, ROOM_H * TILE, null);
-        g.dispose();
     }
 
+    Graphics2D g = (Graphics2D) graphics.create();
+    g.clip(visibleFloor);
+    g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+            RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+    g.drawImage(background, origin[0] * TILE, origin[1] * TILE,
+            ROOM_W * TILE, ROOM_H * TILE, null);
+    g.dispose();
+}
+        
     @Override
     protected void paintComponent(Graphics g) {
 
@@ -2625,7 +2654,9 @@ final class Main extends JPanel {
             }
         }
 
-        drawRoomOneBackground(g2);
+        for (int roomId = 0; roomId < ROOM_COUNT; roomId++) {
+    drawRoomBackground(g2, roomId);
+}
 
         // Draw lockers
         g2.setColor(LOCKER_COLOR);
@@ -3061,10 +3092,11 @@ final class Main extends JPanel {
     }
 
     static final class GameSession {
-        final JFrame frame;
-        Main run;
+    final JFrame frame;
+    Main run;
+    boolean endingStarted;
 
-        GameSession(JFrame frame) { this.frame = frame; }
+    GameSession(JFrame frame) { this.frame = frame; }
 
         boolean canContinue() { return run != null && !run.gameOver && !run.won; }
 
@@ -3072,6 +3104,19 @@ final class Main extends JPanel {
             if (run != null) run.suspendForMenu();
             if (frame != null) show(new MainMenuPanel(frame, this));
         }
+
+        void playEnding() {
+    if (endingStarted || frame == null || run == null || !run.won) {
+        return;
+    }
+    endingStarted = true;
+    run.suspendForMenu();
+    EndingVideoPanel.showAfterEscape(
+            frame,
+            new Font("Monospaced", Font.BOLD, 15),
+            () -> show(new MainMenuPanel(frame, this))
+    );
+}
 
         void startNewGame(Font menuFont) {
             if (canContinue() && frame != null && JOptionPane.showConfirmDialog(frame,
