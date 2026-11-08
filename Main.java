@@ -217,7 +217,7 @@ final class Main extends JPanel {
     // DEBUG = true : shows the monster, its state, debug info and the shift timer.
     // M opens the remembered map; it never reveals the monster.
     // Set to false for the real horror experience.
-    static final boolean DEBUG = true;
+    static final boolean DEBUG = false;
     static final long SEED = 12345; // used for the random generator in DEBUG
 
     // Map layout: a 3x3 grid of rooms with hallway gaps between them

@@ -1,0 +1,17 @@
+Dead Signal includes these third-party runtime components:
+
+Eclipse Temurin OpenJDK 25
+https://adoptium.net/
+OpenJDK is distributed under the GNU General Public License, version 2,
+with the Classpath Exception. Component-specific notices and licenses
+are included under runtime/legal in the installed application directory.
+Source and build information: https://github.com/adoptium/temurin25-binaries
+
+OpenJFX / JavaFX 17.0.21
+https://openjfx.io/
+Distributed under the GNU General Public License, version 2, with the
+Classpath Exception. See JAVAFX-LICENSE.txt and the javafx-legal directory for component notices.
+Source: https://github.com/openjdk/jfx/tree/jfx17
+
+These notices describe the bundled runtime components. They do not grant
+a separate license to Dead Signal's game code, artwork, or videos.
