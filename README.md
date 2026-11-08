@@ -69,7 +69,7 @@ Hold a direction to keep moving. The most recently pressed direction takes prior
 release it to resume another direction you are still holding. Shift changes between
 walking and running while moving. Switching away from the window clears held input.
 
-The imported source has `DEBUG = true`. In this mode, shifts happen every 30 seconds and the random generator uses a fixed seed. Normal mode uses a 2–3 minute shift interval. The initial import preserves these settings.
+Public playtest builds use `DEBUG = false`: debug information is hidden, each run uses fresh randomness, and shifts happen every 2–3 minutes. Developer debug mode uses a fixed seed and a 30-second interval.
 
 ## Rooms and doors
 
@@ -198,3 +198,42 @@ Add any other intended source or documentation files explicitly. Open a pull req
 The first commit is the agreed baseline directly on `main`. Later changes use branches and pull requests. Reviews are an agreed team workflow on GitHub Free; this private repository does not enforce required approvals with branch protection.
 
 Each developer should use their own Git author identity and commit email. Never share authentication tokens or commit compiler output or local machine credentials.
+
+## Windows installer
+
+Public playtest version: **0.1.0**. The Windows x64 installer bundles the game,
+all artwork and videos, JavaFX 17.0.21, and a private Java runtime. Players do not
+need Java, Git, VS Code, PowerShell commands, or a first-run dependency download.
+The installer offers a destination folder and creates desktop and Start Menu
+shortcuts. It installs for the current user and supports uninstalling through
+Windows Settings > Apps. Run progress remains in memory only.
+
+Build on Windows x64 with a **full JDK 25** (tested with Eclipse Temurin
+25.0.5+8) and WiX (tested with the portable WiX 3.14.1 binaries). These tools are
+needed by the developer building the installer, not by players. The Java runtime
+bundled with the VS Code extension lacks jpackage and jlink.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\package-windows.ps1 -JavaHome 'C:\path\to\full-jdk-25' -WixHome 'C:\path\to\wix'
+```
+
+The build refuses debug mode and uses a fresh staging directory to avoid stale
+classes. Before creating the installer, it verifies every asset and runs the
+packaged gameplay and native video checks from an empty working directory with
+JAVA_HOME cleared and Java removed from PATH. It writes `build/releases/DeadSignal-0.1.0-windows-x64-setup.exe` and its
+`.sha256` checksum. Use `-Version 0.1.1` for a later build and `-OutputDirectory`
+for a different destination. Existing release files are not overwritten. For
+app-image testing without WiX, use `-Type app-image`; this produces a folder
+containing `DeadSignal.exe`, `app/`, and `runtime/`.
+
+Before publishing, install the EXE into a clean directory and test that installed
+copy outside the source folder. Verify bundled art, New Game, video playback and
+Skip, movement, doors, the map, escape/outro, and uninstall. Run the existing
+`game.ps1 -Action Test` and `-Action MediaTest` checks with the selected JDK.
+
+Upload only the installer and checksum to the public
+[DeadSignal-Releases](https://github.com/DeadSignal-Team/DeadSignal-Releases)
+repository. Keep this source repository private. Mark 0.1.0 as a prerelease and
+link directly to its installer; GitHub's automatic source archives are not the
+game download. Release builds include `app/build-info.json` with their version,
+Java/JavaFX versions, and the SHA-256 of Main.java.
