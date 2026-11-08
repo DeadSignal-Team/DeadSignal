@@ -78,7 +78,7 @@ if ($Action -eq 'Build') {
     if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed.' }
     $classPath = "$testClasses$([IO.Path]::PathSeparator)$classes"
     foreach ($test in $tests) {
-        $nativeMedia = $test.BaseName -in @('IntroMediaCheck', 'IntroWindowCheck')
+        $nativeMedia = $test.BaseName -in @('IntroMediaCheck', 'IntroWindowCheck', 'OutroWindowCheck')
         if (($Action -eq 'MediaTest') -ne $nativeMedia) { continue }
         $testOptions = @()
         if (-not $nativeMedia) { $testOptions += '-Djava.awt.headless=true' }
