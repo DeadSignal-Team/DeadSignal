@@ -25,7 +25,7 @@ import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
 import javafx.scene.media.MediaView;
 
-/** The New Game intro. Gameplay is created only after this panel finishes. */
+/** Embedded video screen shared by the New Game intro and successful-escape outro. */
 final class IntroVideoPanel extends JLayeredPane {
     interface Playback {
         JComponent component();
@@ -38,8 +38,9 @@ final class IntroVideoPanel extends JLayeredPane {
     }
 
     private final String source;
+    private final String videoName;
     private final Font menuFont;
-    private final Runnable beginGame;
+    private final Runnable onFinished;
     private final PlaybackFactory playbackFactory;
     final JButton skipButton;
     final Timer loadingTimeout;
@@ -47,30 +48,46 @@ final class IntroVideoPanel extends JLayeredPane {
     private boolean started;
     private boolean finished;
     private boolean detached;
-    private boolean gameStarted;
+    private boolean completionDelivered;
 
-    static void showBeforeGame(JFrame frame, Font menuFont, Runnable beginGame) {
-        IntroVideoPanel intro = new IntroVideoPanel(findSource(), menuFont,
-                beginGame, JavaFxPlayback::new);
-        frame.setContentPane(intro);
+    static void showBeforeGame(JFrame frame, Font menuFont, Runnable onFinished) {
+        showVideo(frame, menuFont, onFinished, "intro");
+    }
+
+    static void showAfterEscape(JFrame frame, Font menuFont, Runnable onFinished) {
+        showVideo(frame, menuFont, onFinished, "outro");
+    }
+
+    private static void showVideo(JFrame frame, Font menuFont, Runnable onFinished, String name) {
+        IntroVideoPanel video = new IntroVideoPanel(findSource(name + ".mp4"), menuFont,
+                onFinished, JavaFxPlayback::new, name);
+        frame.setContentPane(video);
         frame.revalidate();
         frame.repaint();
     }
 
     static String findSource() {
-        URL bundled = IntroVideoPanel.class.getResource("/assets/video/intro.mp4");
-        if (bundled != null) {
-            return bundled.toExternalForm();
-        }
-        File local = new File("assets/video/intro.mp4");
+        return findSource("intro.mp4");
+    }
+
+    static String findSource(String fileName) {
+        URL bundled = IntroVideoPanel.class.getResource("/assets/video/" + fileName);
+        if (bundled != null) return bundled.toExternalForm();
+        File local = new File("assets/video/" + fileName);
         return local.isFile() ? local.toURI().toString() : null;
     }
 
-    IntroVideoPanel(String source, Font menuFont, Runnable beginGame,
+    IntroVideoPanel(String source, Font menuFont, Runnable onFinished,
                     PlaybackFactory playbackFactory) {
+        this(source, menuFont, onFinished, playbackFactory, "intro");
+    }
+
+    IntroVideoPanel(String source, Font menuFont, Runnable onFinished,
+                    PlaybackFactory playbackFactory, String videoName) {
         this.source = source;
+        this.videoName = videoName;
         this.menuFont = menuFont;
-        this.beginGame = beginGame;
+        this.onFinished = onFinished;
         this.playbackFactory = playbackFactory;
         setOpaque(true);
         setBackground(Color.BLACK);
@@ -93,7 +110,7 @@ final class IntroVideoPanel extends JLayeredPane {
         skipButton.setFocusPainted(false);
         skipButton.setBorder(BorderFactory.createLineBorder(new Color(170, 25, 38), 2));
         skipButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        skipButton.getAccessibleContext().setAccessibleName("Skip intro video");
+        skipButton.getAccessibleContext().setAccessibleName("Skip " + videoName + " video");
         skipButton.addActionListener(e -> finishIntro());
         skipButton.addMouseListener(new MouseAdapter() {
             @Override
@@ -108,7 +125,7 @@ final class IntroVideoPanel extends JLayeredPane {
         });
         add(skipButton, PALETTE_LAYER);
         loadingTimeout = new Timer(15_000,
-                e -> playbackFailed(new IllegalStateException("Video did not start in time")));
+                e -> playbackFailed(new IllegalStateException(videoName + " video did not start in time")));
         loadingTimeout.setRepeats(false);
     }
 
@@ -147,7 +164,7 @@ final class IntroVideoPanel extends JLayeredPane {
         }
         started = true;
         if (source == null) {
-            playbackFailed(new IllegalStateException("Missing assets/video/intro.mp4"));
+            playbackFailed(new IllegalStateException("Missing assets/video/" + videoName + ".mp4"));
             return;
         }
         try {
@@ -167,7 +184,7 @@ final class IntroVideoPanel extends JLayeredPane {
 
     private void playbackFailed(Throwable failure) {
         if (!finished && !detached) {
-            System.err.println("Intro video unavailable: " + failure.getMessage());
+            System.err.println(videoName + " video unavailable: " + failure.getMessage());
             finishIntro();
         }
     }
@@ -180,9 +197,9 @@ final class IntroVideoPanel extends JLayeredPane {
         loadingTimeout.stop();
         skipButton.setEnabled(false);
         closePlayback(() -> {
-            if (!detached && !gameStarted) {
-                gameStarted = true;
-                beginGame.run();
+            if (!detached && !completionDelivered) {
+                completionDelivered = true;
+                onFinished.run();
             }
         });
     }
@@ -197,7 +214,7 @@ final class IntroVideoPanel extends JLayeredPane {
         try {
             previous.close(() -> onSwing(closed));
         } catch (RuntimeException | LinkageError failure) {
-            System.err.println("Could not release intro video: " + failure.getMessage());
+            System.err.println("Could not release " + videoName + " video: " + failure.getMessage());
             closed.run();
         }
     }
@@ -273,11 +290,9 @@ final class IntroVideoPanel extends JLayeredPane {
                     if (player != null) {
                         MediaPlayer previous = player;
                         player = null;
-                        try {
-                            previous.stop();
-                        } finally {
-                            previous.dispose();
-                        }
+                        // dispose() releases playback directly; a separate stop()
+                        // can deliver a late STOPPED event after disposal.
+                        previous.dispose();
                     }
                     surface.setScene(null);
                 } finally {

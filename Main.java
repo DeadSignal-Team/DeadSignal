@@ -57,6 +57,18 @@ final class Main extends JPanel {
         static final BufferedImage[] MONSTER_WALK_RIGHT = Arrays.copyOfRange(MONSTER_FRAMES, 0, 3);
         static final BufferedImage[] MONSTER_WALK_LEFT = Arrays.copyOfRange(MONSTER_FRAMES, 3, 6);
         static final BufferedImage ROOM_ONE = loadSprite("rooms/room_01.png");
+        static final BufferedImage[] ROOM_BACKGROUNDS = {
+                ROOM_ONE,
+                loadSprite("rooms/ROOM-2.png"),
+                loadSprite("rooms/ROOM-3.png"),
+                loadSprite("rooms/ROOM-4.png"),
+                loadSprite("rooms/ROOM-5.png"),
+                loadSprite("rooms/ROOM-6.png"),
+                loadSprite("rooms/ROOM-7.png"),
+                loadSprite("rooms/ROOM-8.png"),
+                loadSprite("rooms/ROOM-9.png")
+        };
+        static final BufferedImage HALLWAY = loadSprite("rooms/hallway.png");
 
         // Loads a group of frames and crops them all to the SAME box, so the
         // character keeps one size and its feet stay in the same place.
@@ -570,6 +582,7 @@ final class Main extends JPanel {
     boolean hidden = false; // hiding in a locker
     boolean gameOver = false;
     boolean won = false;
+    boolean outroStarted;
 
     int shiftNumber = 0;
 
@@ -1379,6 +1392,7 @@ final class Main extends JPanel {
         if (gameOver || won) {
             clearMovementInput();
         }
+        if (won && ownerSession != null) ownerSession.showWinOutro(this);
         repaint();
     }
 
@@ -2361,6 +2375,7 @@ final class Main extends JPanel {
         if (gameOver || won) {
             closeMap();
             updateWarningCues(gameNow());
+            if (won && ownerSession != null) ownerSession.showWinOutro(this);
             repaint();
             return;
         }
@@ -2404,6 +2419,7 @@ final class Main extends JPanel {
         hidden = false;
         gameOver = false;
         won = false;
+        outroStarted = false;
 
         shiftNumber = 0;
 
@@ -2511,11 +2527,19 @@ final class Main extends JPanel {
         return SpriteAssets.frame(frames, gameNow(), lastMonsterStepAt, 180);
     }
 
+    // Keep this wrapper for the existing Room 1 art checks.
     void drawRoomOneBackground(Graphics2D graphics) {
-        if (SpriteAssets.ROOM_ONE == null) return;
-        int[] origin = roomTile(0, 0, 0);
-        // The artwork belongs to persistent Room 1, including after a shift.
-        // Clip to uncovered floor: the background cannot reveal a hidden room.
+        drawRoomBackground(graphics, 0);
+    }
+
+    void drawRoomBackgrounds(Graphics2D graphics) {
+        for (int room = 0; room < ROOM_COUNT; room++) drawRoomBackground(graphics, room);
+    }
+
+    void drawRoomBackground(Graphics2D graphics, int room) {
+        BufferedImage background = SpriteAssets.ROOM_BACKGROUNDS[room];
+        if (background == null) return;
+        int[] origin = roomTile(room, 0, 0);
         java.awt.geom.Area visibleFloor = new java.awt.geom.Area();
         for (int y = origin[1]; y < origin[1] + ROOM_H; y++) {
             for (int x = origin[0]; x < origin[0] + ROOM_W; x++) {
@@ -2528,10 +2552,43 @@ final class Main extends JPanel {
         g.clip(visibleFloor);
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
                 RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        g.drawImage(SpriteAssets.ROOM_ONE, origin[0] * TILE, origin[1] * TILE,
+        g.drawImage(background, origin[0] * TILE, origin[1] * TILE,
                 ROOM_W * TILE, ROOM_H * TILE, null);
         g.dispose();
     }
+
+    void drawHallwayBackgrounds(Graphics2D graphics) {
+        BufferedImage background = SpriteAssets.HALLWAY;
+        if (background == null) return;
+        for (Connection connection : conns) {
+            if (!connection.open) continue;
+            int column = connection.a % ROOM_COLS, row = connection.a / ROOM_COLS;
+            int x = connection.horizontal ? roomX0[column] + ROOM_W : roomX0[column] + connection.offset;
+            int y = connection.horizontal ? roomY0[row] + connection.offset : roomY0[row] + ROOM_H;
+            int width = connection.horizontal ? roomX0[column + 1] - x : 1;
+            int height = connection.horizontal ? 1 : roomY0[row + 1] - y;
+            java.awt.geom.Area visibleFloor = new java.awt.geom.Area();
+            for (int dy = 0; dy < height; dy++) for (int dx = 0; dx < width; dx++) {
+                if (map[y + dy][x + dx] == 'h' && !isCovered(x + dx, y + dy)) {
+                    visibleFloor.add(new java.awt.geom.Area(new Rectangle(
+                            (x + dx) * TILE, (y + dy) * TILE, TILE, TILE)));
+                }
+            }
+            Graphics2D g = (Graphics2D) graphics.create();
+            g.clip(visibleFloor);
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                    RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+            if (connection.horizontal) {
+                g.drawImage(background, x * TILE, y * TILE, width * TILE, TILE, null);
+            } else {
+                g.translate((x + 1) * TILE, y * TILE);
+                g.rotate(Math.PI / 2);
+                g.drawImage(background, 0, 0, height * TILE, TILE, null);
+            }
+            g.dispose();
+        }
+    }
+
 
     @Override
     protected void paintComponent(Graphics g) {
@@ -2625,7 +2682,8 @@ final class Main extends JPanel {
             }
         }
 
-        drawRoomOneBackground(g2);
+        drawRoomBackgrounds(g2);
+        drawHallwayBackgrounds(g2);
 
         // Draw lockers
         g2.setColor(LOCKER_COLOR);
@@ -3063,6 +3121,7 @@ final class Main extends JPanel {
     static final class GameSession {
         final JFrame frame;
         Main run;
+        Font cutsceneFont = new Font("Monospaced", Font.BOLD, 15);
 
         GameSession(JFrame frame) { this.frame = frame; }
 
@@ -3078,6 +3137,7 @@ final class Main extends JPanel {
                     "Replace your current run with a new game?", "NEW GAME",
                     JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
             if (run != null) run.suspendForMenu();
+            cutsceneFont = menuFont;
             Runnable beginRun = () -> {
                 run = new Main();
                 run.ownerSession = this;
@@ -3085,6 +3145,18 @@ final class Main extends JPanel {
             };
             if (frame == null) beginRun.run();
             else IntroVideoPanel.showBeforeGame(frame, menuFont, beginRun);
+        }
+
+        void showWinOutro(Main completedRun) {
+            if (completedRun != run || !completedRun.won || completedRun.outroStarted) return;
+            completedRun.outroStarted = true;
+            completedRun.suspendForMenu();
+            Runnable returnToMenu = () -> {
+                // A late completion must not replace a different run.
+                if (run == completedRun) showMenu();
+            };
+            if (frame == null) returnToMenu.run();
+            else IntroVideoPanel.showAfterEscape(frame, cutsceneFont, returnToMenu);
         }
 
         void continueGame() {

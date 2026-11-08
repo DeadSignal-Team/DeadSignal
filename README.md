@@ -40,6 +40,16 @@ When replacing a current run, the existing New Game confirmation appears first. 
 
 The supplied video is bundled with the build and does not depend on a personal Videos folder. JavaFX supports MP4/H.264 video with AAC audio; replacing the clip requires a compatible encoding.
 
+## Successful escape outro
+
+Reaching the keycard exit with the keycard plays `assets/video/outro.mp4` once for
+that successful run. The monster, player input, shift timers, and warning audio
+stop while it plays. Finishing the video or pressing the bottom-right **SKIP**
+button returns to the main menu. Continue is disabled for a finished run.
+Ordinary room departures, a locked exit, defeat, and R/restart do not play the
+outro. Every later successful run plays it again. Missing or failed playback
+falls back to the main menu, using the same cleanup and timeout as the intro.
+
 ## Controls
 
 | Control | Action |
@@ -145,10 +155,17 @@ keeps the last side facing; standing still or being stunned holds the first fram
 All six frames share the same crop and foot baseline. Missing sprites still use
 the game's fallback shapes.
 
-`assets/rooms/room_01.png` is the supplied Room 1 background, copied unchanged.
-It is drawn with nearest-neighbor sampling beneath actors, items, and doors, and
-stays attached to Room 1 when rooms exchange locations. Covered rooms remain
-hidden. Its furniture is decorative and does not add collision or interactions.
+All nine supplied room backgrounds are now loaded: `assets/rooms/room_01.png`
+for Room 1 and `ROOM-2.png` through `ROOM-9.png` for Rooms 2-9. Filenames and
+artwork are preserved. Each image follows its persistent room identity during
+shifts and stays hidden beneath covered ceilings. `assets/rooms/hallway.png`
+fills open hallway passages and rotates for vertical corridors. Artwork is
+clipped to visible floor and drawn beneath actors, items, and doorframes.
+Furniture and painted details remain decorative; collision is unchanged.
+
+`game.ps1 -Action Test` includes room-art visibility, shifting, hallway clipping,
+and successful-escape/outro lifecycle checks. `-Action MediaTest` verifies both
+bundled clips and the real intro and outro window flows.
 
 The source looks for player and monster images under `/assets/` on the classpath, `src/main/resources/assets/`, or `assets/` relative to the working directory. The filenames and letter casing are listed in `SpriteAssets` inside `Main.java`.
 

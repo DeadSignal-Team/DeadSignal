@@ -16,22 +16,24 @@ public final class IntroMediaCheck {
     private static final AtomicReference<Throwable> failure = new AtomicReference<>();
     private static MediaPlayer active;
     private static int completed;
+    private static int clip;
+    private static String[] sources;
 
     public static void main(String[] args) throws Exception {
-        String source = IntroVideoPanel.findSource();
-        if (source == null) throw new AssertionError("Bundled intro is missing");
+        sources = new String[] {IntroVideoPanel.findSource(), IntroVideoPanel.findSource("outro.mp4")};
+        for (String source : sources) if (source == null) throw new AssertionError("Bundled cutscene is missing");
         Platform.startup(() -> {
             Platform.setImplicitExit(false);
-            play(source);
+            play(sources[0]);
         });
-        boolean finished = done.await(25, TimeUnit.SECONDS);
+        boolean finished = done.await(45, TimeUnit.SECONDS);
         Platform.runLater(() -> {
             if (active != null) active.dispose();
             Platform.exit();
         });
         if (!finished) throw new AssertionError("Native intro playback timed out");
         if (failure.get() != null) throw new AssertionError("Native intro playback failed", failure.get());
-        System.out.println("Native intro checks passed: decoded, reached end, disposed, and replayed twice.");
+        System.out.println("Native cutscene checks passed: intro and outro decoded, ended, disposed, and replayed twice each.");
     }
 
     private static void play(String source) {
@@ -47,7 +49,7 @@ public final class IntroMediaCheck {
                         || media.getWidth() <= 0 || media.getHeight() <= 0) {
                     fail(new AssertionError("Intro has no decodable video track"));
                 } else {
-                    System.out.println("Intro: " + media.getWidth() + "x" + media.getHeight()
+                    System.out.println((clip == 0 ? "Intro: " : "Outro: ") + media.getWidth() + "x" + media.getHeight()
                             + ", " + media.getDuration().toSeconds() + " seconds");
                 }
             });
@@ -63,6 +65,9 @@ public final class IntroMediaCheck {
                     fail(new AssertionError("MediaPlayer was not released"));
                 } else if (++completed < 2) {
                     play(source);
+                } else if (++clip < sources.length) {
+                    completed = 0;
+                    play(sources[clip]);
                 } else {
                     done.countDown();
                 }
